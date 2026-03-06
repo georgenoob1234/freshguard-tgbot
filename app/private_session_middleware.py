@@ -52,5 +52,6 @@ class PrivateSessionMiddleware(BaseMiddleware):
             LOGGER.debug("Ignoring non-private update chat_type=%s", getattr(chat, "type", None))
             return None
 
+        data["oms_client"] = self._oms_client
         data["session_state"] = await self._oms_client.ensure_session(from_user=from_user, chat=chat)
         return await handler(event, data)
