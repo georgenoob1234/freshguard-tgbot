@@ -79,11 +79,41 @@ Bot command menu entries are loaded from `bot_commands` in `config/messages.ru.j
 
 ## Docker
 
+### Build
+
 ```bash
-docker build -t tgbot:milestone2 .
-docker run --rm \
-  -e TELEGRAM_BOT_TOKEN="123456:replace_with_real_token" \
-  -e OMS_BASE_URL="https://oms.example.com" \
-  -e OMS_BOT_TOKEN="replace_with_real_service_token" \
-  tgbot:milestone2
+docker build -t tgbot:latest .
 ```
+
+### Run (standalone)
+
+```bash
+docker run --rm \
+  -e TELEGRAM_BOT_TOKEN="your-token" \
+  -e OMS_BASE_URL="https://oms.example.com" \
+  -e OMS_BOT_TOKEN="your-oms-token" \
+  tgbot:latest
+```
+
+### Run with env file
+
+```bash
+cp .env.example .env
+# Edit .env with real values
+docker run --rm --env-file .env tgbot:latest
+```
+
+### Run with Docker Compose
+
+```bash
+cp .env.example .env
+# Edit .env with real values
+docker compose up -d
+```
+
+### OMS on host machine
+
+If OMS runs on the host, use `host.docker.internal` for `OMS_BASE_URL`:
+
+- **Linux**: `docker run --add-host=host.docker.internal:host-gateway ...`
+- **Compose**: Uncomment `extra_hosts` in `docker-compose.yml`

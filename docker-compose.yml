@@ -1,0 +1,9 @@
+services:
+  tgbot:
+    build: .
+    image: tgbot:latest
+    env_file: .env
+    restart: unless-stopped
+    # OMS on host: uncomment for Linux
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
