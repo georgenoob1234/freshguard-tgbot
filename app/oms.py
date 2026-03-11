@@ -151,6 +151,15 @@ class DeviceStatusSummary:
     connected: bool = False
     last_seen_at: str | None = None
     online: bool = False
+    actions: "DeviceActionVisibility | None" = None
+
+
+@dataclass(frozen=True)
+class DeviceActionVisibility:
+    show_photo: bool = False
+    show_tare: bool = False
+    show_tare_set: bool = False
+    show_tare_reset: bool = False
 
 
 @dataclass(frozen=True)
@@ -564,12 +573,22 @@ def _parse_device_status(payload: Any) -> DeviceStatusSummary | None:
         return None
 
     display_name = _string_or_none(payload_dict.get("display_name")) or device_id
+    actions_payload = _as_dict(payload_dict.get("actions"))
+    actions = None
+    if actions_payload:
+        actions = DeviceActionVisibility(
+            show_photo=_bool_from_any(actions_payload.get("show_photo"), default=False),
+            show_tare=_bool_from_any(actions_payload.get("show_tare"), default=False),
+            show_tare_set=_bool_from_any(actions_payload.get("show_tare_set"), default=False),
+            show_tare_reset=_bool_from_any(actions_payload.get("show_tare_reset"), default=False),
+        )
     return DeviceStatusSummary(
         device_id=device_id,
         display_name=display_name,
         connected=_bool_from_any(payload_dict.get("connected"), default=False),
         last_seen_at=_string_or_none(payload_dict.get("last_seen_at")),
         online=_bool_from_any(payload_dict.get("online"), default=False),
+        actions=actions,
     )
 
 

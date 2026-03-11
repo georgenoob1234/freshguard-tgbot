@@ -21,7 +21,7 @@ from app.callbacks import (
     build_unlink_pick_callback,
 )
 from app.messages import msg
-from app.oms import DeviceSummary, StoreSummary
+from app.oms import DeviceActionVisibility, DeviceSummary, StoreSummary
 
 
 def build_store_switch_keyboard(stores: Sequence[StoreSummary]) -> InlineKeyboardMarkup | None:
@@ -69,21 +69,50 @@ def build_device_list_keyboard(devices: Sequence[DeviceSummary]) -> InlineKeyboa
     return builder.as_markup()
 
 
-def build_selected_device_keyboard(device_id: str) -> InlineKeyboardMarkup:
+def build_selected_device_keyboard(
+    device_id: str,
+    actions: DeviceActionVisibility | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text=msg("buttons.status"), callback_data=build_device_status_callback(device_id))
     builder.button(text=msg("buttons.last_detection"), callback_data=build_device_last_callback(device_id))
-    builder.button(text=msg("buttons.photo"), callback_data=build_device_photo_callback(device_id))
-    builder.button(text=msg("buttons.tare"), callback_data=build_device_tare_menu_callback(device_id))
+
+    show_photo = actions.show_photo if actions is not None else False
+    show_tare = actions.show_tare if actions is not None else False
+    if show_photo:
+        builder.button(text=msg("buttons.photo"), callback_data=build_device_photo_callback(device_id))
+    if show_tare:
+        builder.button(text=msg("buttons.tare"), callback_data=build_device_tare_menu_callback(device_id))
+
     builder.button(text=msg("buttons.back"), callback_data=build_device_back_callback())
-    builder.adjust(2, 2, 1)
+    if show_photo and show_tare:
+        builder.adjust(2, 2, 1)
+    elif show_photo or show_tare:
+        builder.adjust(2, 1, 1)
+    else:
+        builder.adjust(2, 1)
     return builder.as_markup()
 
 
-def build_device_tare_keyboard(device_id: str) -> InlineKeyboardMarkup:
+def build_device_tare_keyboard(
+    device_id: str,
+    actions: DeviceActionVisibility | None = None,
+) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text=msg("buttons.confirm_tare"), callback_data=build_device_tare_confirm_callback(device_id))
-    builder.button(text=msg("buttons.reset_tare"), callback_data=build_device_tare_reset_callback(device_id))
+    show_tare_set = actions.show_tare_set if actions is not None else False
+    show_tare_reset = actions.show_tare_reset if actions is not None else False
+    action_count = 0
+    if show_tare_set:
+        builder.button(text=msg("buttons.confirm_tare"), callback_data=build_device_tare_confirm_callback(device_id))
+        action_count += 1
+    if show_tare_reset:
+        builder.button(text=msg("buttons.reset_tare"), callback_data=build_device_tare_reset_callback(device_id))
+        action_count += 1
     builder.button(text=msg("buttons.cancel"), callback_data=build_device_tare_cancel_callback(device_id))
-    builder.adjust(2, 1)
+    if action_count >= 2:
+        builder.adjust(2, 1)
+    elif action_count == 1:
+        builder.adjust(1, 1)
+    else:
+        builder.adjust(1)
     return builder.as_markup()

@@ -10,7 +10,6 @@ from typing import Any
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from app.callbacks import (
     DEVICE_BACK,
@@ -72,6 +71,7 @@ from app.oms import (
     ERROR_STORE_HAS_NO_DEVICES,
     ERROR_STORE_NOT_FOUND,
     ERROR_UNAVAILABLE,
+    DeviceActionVisibility,
     DeviceStatusSummary,
     EnsureSessionResult,
     InviteSummary,
@@ -95,8 +95,6 @@ LINK_ERROR_MESSAGES = {
     ERROR_EXHAUSTED: "link.exhausted",
     ERROR_STORE_INACTIVE: "link.store_inactive",
 }
-CONTROL_DEVICE_ROLES = {"operator", "store_admin", "root"}
-READONLY_DEVICE_ROLES = {"viewer", "auditor"}
 IN_FLIGHT_COMMANDS: dict[tuple[int, str, str], float] = {}
 IN_FLIGHT_TTL_SECONDS = 30.0
 
@@ -356,38 +354,29 @@ def _build_command_error_text(error_code: str | None) -> str:
     return msg("commands.failed")
 
 
-def _can_control_device(session_state: EnsureSessionResult | None) -> bool:
-    if session_state is None or session_state.active_store is None:
-        return False
-    role = session_state.active_store.role or ""
-    if not role:
-        return True
-    return role in CONTROL_DEVICE_ROLES
+def _device_actions_from_status(status: DeviceStatusSummary | None) -> DeviceActionVisibility | None:
+    if status is None:
+        return None
+    return status.actions
 
 
-def _is_readonly_role(session_state: EnsureSessionResult | None) -> bool:
-    if session_state is None or session_state.active_store is None:
-        return True
-    role = session_state.active_store.role or ""
-    if role in CONTROL_DEVICE_ROLES:
-        return False
-    if role in READONLY_DEVICE_ROLES:
-        return True
-    return True
-
-
-def _build_selected_device_keyboard_for_role(
-    device_id: str, session_state: EnsureSessionResult | None
+def _build_selected_device_keyboard_for_status(
+    device_id: str,
+    status: DeviceStatusSummary | None,
 ) -> object:
-    if _can_control_device(session_state):
-        return build_selected_device_keyboard(device_id)
+    return build_selected_device_keyboard(device_id, _device_actions_from_status(status))
 
-    builder = InlineKeyboardBuilder()
-    builder.button(text=msg("buttons.status"), callback_data=build_device_status_callback(device_id))
-    builder.button(text=msg("buttons.last_detection"), callback_data=build_device_last_callback(device_id))
-    builder.button(text=msg("buttons.back"), callback_data=build_device_back_callback())
-    builder.adjust(2, 1)
-    return builder.as_markup()
+
+async def _load_device_actions(
+    oms_client: OmsClient,
+    from_user,
+    chat,
+    device_id: str,
+) -> DeviceActionVisibility | None:
+    status_result = await oms_client.get_device_status(from_user, chat, device_id=device_id)
+    if not status_result.ok or status_result.status is None:
+        return None
+    return status_result.status.actions
 
 
 def _prune_in_flight_commands(now: float) -> None:
@@ -486,11 +475,11 @@ async def _load_selected_device_card_text(
     device_id: str,
     *,
     notice_text: str | None = None,
-) -> str:
+) -> tuple[str, DeviceStatusSummary | None]:
     status_result = await oms_client.get_device_status(from_user, chat, device_id=device_id)
     status = status_result.status if status_result.ok else None
     card_text = _build_selected_device_card_text(session_state, device_id, status=status)
-    return _join_parts(notice_text or "", card_text)
+    return _join_parts(notice_text or "", card_text), status
 
 
 async def _send_message(message: Message, text: str, *, reply_markup: object | None = None) -> None:
@@ -939,7 +928,7 @@ async def device_select_callback_handler(
         await callback_query.answer()
         return
 
-    card_text = await _load_selected_device_card_text(
+    card_text, status = await _load_selected_device_card_text(
         oms_client,
         callback_query.from_user,
         _callback_chat(callback_query),
@@ -949,7 +938,7 @@ async def device_select_callback_handler(
     await _edit_callback_message(
         callback_query,
         card_text,
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
     )
     await callback_query.answer()
 
@@ -998,7 +987,7 @@ async def device_status_callback_handler(
     await _edit_callback_message(
         callback_query,
         _build_device_status_text(status_result.status),
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=_build_selected_device_keyboard_for_status(device_id, status_result.status),
     )
     await callback_query.answer()
 
@@ -1044,10 +1033,16 @@ async def device_last_callback_handler(
         await callback_query.answer(msg("errors.generic"), show_alert=True)
         return
 
+    actions = await _load_device_actions(
+        oms_client,
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        device_id,
+    )
     await _edit_callback_message(
         callback_query,
         _build_latest_result_text(latest_result.result),
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=build_selected_device_keyboard(device_id, actions),
     )
     await callback_query.answer()
 
@@ -1073,7 +1068,13 @@ async def device_photo_callback_handler(
     if not await _require_selected_device_for_callback(callback_query, session_state, device_id):
         return
 
-    if not _can_control_device(session_state):
+    actions = await _load_device_actions(
+        oms_client,
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        device_id,
+    )
+    if actions is None or not actions.show_photo:
         await callback_query.answer(msg("errors.permission_denied"), show_alert=True)
         return
 
@@ -1084,7 +1085,7 @@ async def device_photo_callback_handler(
     await _edit_callback_message(
         callback_query,
         msg("commands.photo.requesting"),
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=build_selected_device_keyboard(device_id, actions),
     )
 
     try:
@@ -1096,7 +1097,7 @@ async def device_photo_callback_handler(
         )
         if not command_result.ok or command_result.command is None:
             error_text = _build_command_error_text(command_result.error_code)
-            card_text = await _load_selected_device_card_text(
+            card_text, status = await _load_selected_device_card_text(
                 oms_client,
                 callback_query.from_user,
                 _callback_chat(callback_query),
@@ -1107,7 +1108,7 @@ async def device_photo_callback_handler(
             await _edit_callback_message(
                 callback_query,
                 card_text,
-                reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+                reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
             )
             await callback_query.answer()
             return
@@ -1120,7 +1121,7 @@ async def device_photo_callback_handler(
         )
         if _command_is_pending(command):
             notice_text = msg("commands.pending")
-            card_text = await _load_selected_device_card_text(
+            card_text, status = await _load_selected_device_card_text(
                 oms_client,
                 callback_query.from_user,
                 _callback_chat(callback_query),
@@ -1131,14 +1132,14 @@ async def device_photo_callback_handler(
             await _edit_callback_message(
                 callback_query,
                 card_text,
-                reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+                reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
             )
             await callback_query.answer()
             return
 
         if command is None or command.status != "succeeded":
             notice_text = _build_command_error_text(command.error_code if command else None)
-            card_text = await _load_selected_device_card_text(
+            card_text, status = await _load_selected_device_card_text(
                 oms_client,
                 callback_query.from_user,
                 _callback_chat(callback_query),
@@ -1149,7 +1150,7 @@ async def device_photo_callback_handler(
             await _edit_callback_message(
                 callback_query,
                 card_text,
-                reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+                reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
             )
             await callback_query.answer()
             return
@@ -1161,7 +1162,7 @@ async def device_photo_callback_handler(
         )
         if not photo_result.ok or photo_result.payload is None:
             notice_text = _build_command_error_text(photo_result.error_code)
-            card_text = await _load_selected_device_card_text(
+            card_text, status = await _load_selected_device_card_text(
                 oms_client,
                 callback_query.from_user,
                 _callback_chat(callback_query),
@@ -1172,7 +1173,7 @@ async def device_photo_callback_handler(
             await _edit_callback_message(
                 callback_query,
                 card_text,
-                reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+                reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
             )
             await callback_query.answer()
             return
@@ -1181,7 +1182,7 @@ async def device_photo_callback_handler(
             BufferedInputFile(photo_result.payload, filename="photo.jpg"),
             caption=msg("commands.photo.ready"),
         )
-        card_text = await _load_selected_device_card_text(
+        card_text, status = await _load_selected_device_card_text(
             oms_client,
             callback_query.from_user,
             _callback_chat(callback_query),
@@ -1192,7 +1193,7 @@ async def device_photo_callback_handler(
         await _edit_callback_message(
             callback_query,
             card_text,
-            reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+            reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
         )
         await callback_query.answer()
     finally:
@@ -1220,21 +1221,21 @@ async def device_tare_menu_callback_handler(
     if not await _require_selected_device_for_callback(callback_query, session_state, device_id):
         return
 
-    if not _can_control_device(session_state):
-        await callback_query.answer(msg("errors.permission_denied"), show_alert=True)
-        return
-
-    card_text = await _load_selected_device_card_text(
+    card_text, status = await _load_selected_device_card_text(
         oms_client,
         callback_query.from_user,
         _callback_chat(callback_query),
         session_state,
         device_id,
     )
+    actions = _device_actions_from_status(status)
+    if actions is None or not actions.show_tare:
+        await callback_query.answer(msg("errors.permission_denied"), show_alert=True)
+        return
     await _edit_callback_message(
         callback_query,
         _join_parts(card_text, msg("tare.menu")),
-        reply_markup=build_device_tare_keyboard(device_id),
+        reply_markup=build_device_tare_keyboard(device_id, actions),
     )
     await callback_query.answer()
 
@@ -1260,7 +1261,13 @@ async def device_tare_confirm_callback_handler(
     if not await _require_selected_device_for_callback(callback_query, session_state, device_id):
         return
 
-    if not _can_control_device(session_state):
+    actions = await _load_device_actions(
+        oms_client,
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        device_id,
+    )
+    if actions is None or not actions.show_tare_set:
         await callback_query.answer(msg("errors.permission_denied"), show_alert=True)
         return
 
@@ -1271,7 +1278,7 @@ async def device_tare_confirm_callback_handler(
     await _edit_callback_message(
         callback_query,
         msg("commands.tare.applying"),
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=build_selected_device_keyboard(device_id, actions),
     )
 
     try:
@@ -1284,7 +1291,7 @@ async def device_tare_confirm_callback_handler(
         )
         if not command_result.ok or command_result.command is None:
             notice_text = _build_command_error_text(command_result.error_code)
-            card_text = await _load_selected_device_card_text(
+            card_text, status = await _load_selected_device_card_text(
                 oms_client,
                 callback_query.from_user,
                 _callback_chat(callback_query),
@@ -1295,7 +1302,7 @@ async def device_tare_confirm_callback_handler(
             await _edit_callback_message(
                 callback_query,
                 card_text,
-                reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+                reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
             )
             await callback_query.answer()
             return
@@ -1313,7 +1320,7 @@ async def device_tare_confirm_callback_handler(
         else:
             notice_text = _build_command_error_text(command.error_code if command else None)
 
-        card_text = await _load_selected_device_card_text(
+        card_text, status = await _load_selected_device_card_text(
             oms_client,
             callback_query.from_user,
             _callback_chat(callback_query),
@@ -1324,7 +1331,7 @@ async def device_tare_confirm_callback_handler(
         await _edit_callback_message(
             callback_query,
             card_text,
-            reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+            reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
         )
         await callback_query.answer()
     finally:
@@ -1352,7 +1359,13 @@ async def device_tare_reset_callback_handler(
     if not await _require_selected_device_for_callback(callback_query, session_state, device_id):
         return
 
-    if not _can_control_device(session_state):
+    actions = await _load_device_actions(
+        oms_client,
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        device_id,
+    )
+    if actions is None or not actions.show_tare_reset:
         await callback_query.answer(msg("errors.permission_denied"), show_alert=True)
         return
 
@@ -1363,7 +1376,7 @@ async def device_tare_reset_callback_handler(
     await _edit_callback_message(
         callback_query,
         msg("commands.tare.applying"),
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=build_selected_device_keyboard(device_id, actions),
     )
 
     try:
@@ -1376,7 +1389,7 @@ async def device_tare_reset_callback_handler(
         )
         if not command_result.ok or command_result.command is None:
             notice_text = _build_command_error_text(command_result.error_code)
-            card_text = await _load_selected_device_card_text(
+            card_text, status = await _load_selected_device_card_text(
                 oms_client,
                 callback_query.from_user,
                 _callback_chat(callback_query),
@@ -1387,7 +1400,7 @@ async def device_tare_reset_callback_handler(
             await _edit_callback_message(
                 callback_query,
                 card_text,
-                reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+                reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
             )
             await callback_query.answer()
             return
@@ -1405,7 +1418,7 @@ async def device_tare_reset_callback_handler(
         else:
             notice_text = _build_command_error_text(command.error_code if command else None)
 
-        card_text = await _load_selected_device_card_text(
+        card_text, status = await _load_selected_device_card_text(
             oms_client,
             callback_query.from_user,
             _callback_chat(callback_query),
@@ -1416,7 +1429,7 @@ async def device_tare_reset_callback_handler(
         await _edit_callback_message(
             callback_query,
             card_text,
-            reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+            reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
         )
         await callback_query.answer()
     finally:
@@ -1444,7 +1457,7 @@ async def device_tare_cancel_callback_handler(
     if not await _require_selected_device_for_callback(callback_query, session_state, device_id):
         return
 
-    card_text = await _load_selected_device_card_text(
+    card_text, status = await _load_selected_device_card_text(
         oms_client,
         callback_query.from_user,
         _callback_chat(callback_query),
@@ -1455,7 +1468,7 @@ async def device_tare_cancel_callback_handler(
     await _edit_callback_message(
         callback_query,
         card_text,
-        reply_markup=_build_selected_device_keyboard_for_role(device_id, session_state),
+        reply_markup=_build_selected_device_keyboard_for_status(device_id, status),
     )
     await callback_query.answer()
 
