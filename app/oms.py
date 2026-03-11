@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -19,6 +20,12 @@ ERROR_INVALID_CODE = "invalid_code"
 ERROR_NO_ACTIVE_STORE = "no_active_store"
 ERROR_NOT_LINKED = "not_linked"
 ERROR_PERMISSION_DENIED = "permission_denied"
+ERROR_COMMAND_NOT_FOUND = "command_not_found"
+ERROR_COMMAND_UNSUPPORTED = "command_unsupported"
+ERROR_COMMAND_CONNECTOR_OFFLINE = "connector_offline"
+ERROR_COMMAND_PHOTO_NOT_READY = "photo_not_ready"
+ERROR_COMMAND_PHOTO_NOT_FOUND = "photo_not_found"
+ERROR_COMMAND_HAS_NO_PHOTO = "command_has_no_photo"
 ERROR_RESULT_NOT_FOUND = "result_not_found"
 ERROR_REVOKED = "revoked"
 ERROR_STORE_INACTIVE = "store_inactive"
@@ -185,6 +192,41 @@ class LatestResultReadResult:
 
 
 @dataclass(frozen=True)
+class DeviceCommandResponse:
+    command_id: str
+    device_id: str
+    store_id: str
+    request_type: str
+    status: str
+    result: dict[str, Any] | None = None
+    error_code: str | None = None
+    created_at: str | None = None
+    completed_at: str | None = None
+
+
+@dataclass(frozen=True)
+class DeviceCommandSubmitResult:
+    ok: bool
+    command: DeviceCommandResponse | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class DeviceCommandStatusResult:
+    ok: bool
+    command: DeviceCommandResponse | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class CommandPhotoResult:
+    ok: bool
+    content_type: str | None = None
+    payload: bytes | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
 class _RawOmsResponse:
     status: int
     payload: Any
@@ -317,6 +359,51 @@ def _extract_error_tokens(payload: Any) -> list[str]:
                 tokens.append(_normalize_token(raw_value))
 
     return [token for token in tokens if token]
+
+
+def _map_command_error(status: int, payload: Any) -> str:
+    tokens = set(_extract_error_tokens(payload))
+    if status == 403 or {"permission_denied", "forbidden"} & tokens:
+        return ERROR_PERMISSION_DENIED
+    if {"command_not_found"} & tokens:
+        return ERROR_COMMAND_NOT_FOUND
+    if {"command_has_no_photo"} & tokens:
+        return ERROR_COMMAND_HAS_NO_PHOTO
+    if {"photo_not_ready"} & tokens:
+        return ERROR_COMMAND_PHOTO_NOT_READY
+    if {"photo_not_found"} & tokens:
+        return ERROR_COMMAND_PHOTO_NOT_FOUND
+    if {"connector_offline"} & tokens:
+        return ERROR_COMMAND_CONNECTOR_OFFLINE
+    if status == 409 and {"connector_offline"} & tokens:
+        return ERROR_COMMAND_CONNECTOR_OFFLINE
+    if status == 400 and {"unsupported_request_type", "invalid_params", "tare_mode"} & tokens:
+        return ERROR_COMMAND_UNSUPPORTED
+    if status == 404:
+        return ERROR_COMMAND_NOT_FOUND
+    return ERROR_UNKNOWN
+
+
+def _parse_command_payload(payload: Any) -> DeviceCommandResponse | None:
+    payload_dict = _as_dict(payload)
+    if not payload_dict:
+        return None
+
+    command_id = _string_or_none(payload_dict.get("command_id"))
+    if command_id is None:
+        return None
+
+    return DeviceCommandResponse(
+        command_id=command_id,
+        device_id=_string_or_none(payload_dict.get("device_id")) or "",
+        store_id=_string_or_none(payload_dict.get("store_id")) or "",
+        request_type=_string_or_none(payload_dict.get("request_type")) or "",
+        status=_string_or_none(payload_dict.get("status")) or "",
+        result=_as_dict(payload_dict.get("result")) if isinstance(payload_dict.get("result"), dict) else None,
+        error_code=_string_or_none(payload_dict.get("error_code")),
+        created_at=_string_or_none(payload_dict.get("created_at")),
+        completed_at=_string_or_none(payload_dict.get("completed_at")),
+    )
 
 
 def _extract_memberships_count(payload: Any, stores: tuple[StoreSummary, ...] = ()) -> int:
@@ -635,6 +722,39 @@ class OmsClient:
                 return _RawOmsResponse(status=response.status, payload=response_payload)
         except asyncio.TimeoutError:
             LOGGER.warning("OMS timeout method=%s path=%s user_id=%s chat_id=%s", method, path, user_id, chat_id)
+            return None
+
+    async def _request_bytes(
+        self,
+        method: str,
+        path: str,
+        *,
+        user_id: str | int | None,
+        chat_id: str | int | None,
+        params: dict[str, Any] | None = None,
+    ) -> tuple[int, bytes | None, str | None] | None:
+        endpoint = f"{self._base_url}{path}"
+        try:
+            async with self._session.request(
+                method,
+                endpoint,
+                params=params,
+                headers=self._headers,
+            ) as response:
+                payload = await response.read()
+                return response.status, payload, response.headers.get("Content-Type")
+        except asyncio.TimeoutError:
+            LOGGER.warning("OMS timeout method=%s path=%s user_id=%s chat_id=%s", method, path, user_id, chat_id)
+            return None
+        except aiohttp.ClientError as exc:
+            LOGGER.warning(
+                "OMS request failed method=%s path=%s user_id=%s chat_id=%s error=%s",
+                method,
+                path,
+                user_id,
+                chat_id,
+                exc,
+            )
             return None
         except aiohttp.ClientError as exc:
             LOGGER.warning(
@@ -1037,6 +1157,118 @@ class OmsClient:
         if latest_result is None:
             return LatestResultReadResult(ok=False, error_code=ERROR_UNKNOWN)
         return LatestResultReadResult(ok=True, result=latest_result)
+
+    async def submit_device_command(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        device_id: str,
+        request_type: str,
+        params: dict[str, Any] | None = None,
+        wait_timeout_ms: int | None = None,
+    ) -> DeviceCommandSubmitResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return DeviceCommandSubmitResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        json_payload: dict[str, Any] = {
+            **payload,
+            "request_type": request_type,
+            "params": params or {},
+        }
+        if wait_timeout_ms is not None:
+            json_payload["wait_timeout_ms"] = wait_timeout_ms
+
+        raw_response = await self._request_json(
+            "POST",
+            f"/devices/{device_id}/commands",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            json_payload=json_payload,
+        )
+        if raw_response is None or raw_response.status >= 500:
+            return DeviceCommandSubmitResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        if raw_response.status >= 400:
+            return DeviceCommandSubmitResult(
+                ok=False,
+                error_code=_map_command_error(raw_response.status, raw_response.payload),
+            )
+
+        command = _parse_command_payload(raw_response.payload)
+        if command is None:
+            return DeviceCommandSubmitResult(ok=False, error_code=ERROR_UNKNOWN)
+        return DeviceCommandSubmitResult(ok=True, command=command)
+
+    async def get_command_status(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        command_id: str,
+    ) -> DeviceCommandStatusResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return DeviceCommandStatusResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        raw_response = await self._request_json(
+            "GET",
+            f"/commands/{command_id}",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            params=payload,
+        )
+        if raw_response is None or raw_response.status >= 500:
+            return DeviceCommandStatusResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        if raw_response.status >= 400:
+            return DeviceCommandStatusResult(
+                ok=False,
+                error_code=_map_command_error(raw_response.status, raw_response.payload),
+            )
+
+        command = _parse_command_payload(raw_response.payload)
+        if command is None:
+            return DeviceCommandStatusResult(ok=False, error_code=ERROR_UNKNOWN)
+        return DeviceCommandStatusResult(ok=True, command=command)
+
+    async def fetch_command_photo(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        command_id: str,
+    ) -> CommandPhotoResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return CommandPhotoResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        raw_response = await self._request_bytes(
+            "GET",
+            f"/commands/{command_id}/photo",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            params=payload,
+        )
+        if raw_response is None:
+            return CommandPhotoResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        status, payload_bytes, content_type = raw_response
+        if status >= 500:
+            return CommandPhotoResult(ok=False, error_code=ERROR_UNAVAILABLE)
+        if status >= 400:
+            error_payload: Any = None
+            try:
+                if payload_bytes:
+                    error_payload = json.loads(payload_bytes.decode("utf-8"))
+            except Exception:
+                error_payload = None
+            return CommandPhotoResult(
+                ok=False,
+                error_code=_map_command_error(status, error_payload),
+            )
+        return CommandPhotoResult(ok=True, payload=payload_bytes, content_type=content_type)
 
     async def revoke_self_membership(
         self,

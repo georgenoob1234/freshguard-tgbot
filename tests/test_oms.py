@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from app.oms import (
@@ -12,6 +13,8 @@ from app.oms import (
     ERROR_RESULT_NOT_FOUND,
     ERROR_STORE_INACTIVE,
     ERROR_STORE_HAS_NO_DEVICES,
+    ERROR_COMMAND_PHOTO_NOT_READY,
+    ERROR_COMMAND_UNSUPPORTED,
     OmsClient,
 )
 
@@ -20,6 +23,7 @@ class FakeResponse:
     def __init__(self, status: int, payload) -> None:
         self.status = status
         self._payload = payload
+        self.headers = {}
 
     async def __aenter__(self):
         return self
@@ -29,6 +33,15 @@ class FakeResponse:
 
     async def json(self, content_type=None):
         return self._payload
+
+    async def read(self):
+        if isinstance(self._payload, (bytes, bytearray)):
+            return bytes(self._payload)
+        if isinstance(self._payload, str):
+            return self._payload.encode("utf-8")
+        if isinstance(self._payload, dict):
+            return json.dumps(self._payload).encode("utf-8")
+        return str(self._payload).encode("utf-8")
 
 
 class FakeSession:
@@ -467,3 +480,63 @@ def test_get_device_latest_result_maps_result_not_found() -> None:
 
     assert result.ok is False
     assert result.error_code == ERROR_RESULT_NOT_FOUND
+
+
+def test_submit_device_command_posts_payload() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "command_id": "c1",
+                    "device_id": "d1",
+                    "store_id": "s1",
+                    "request_type": "camera.capture",
+                    "status": "succeeded",
+                    "result": {"blob_id": "b1"},
+                    "error_code": None,
+                    "created_at": "2026-03-07T14:05:00Z",
+                    "completed_at": "2026-03-07T14:05:05Z",
+                },
+            )
+        ]
+    )
+    client = _build_client(session)
+
+    result = asyncio.run(
+        client.submit_device_command(
+            _dummy_user(),
+            _dummy_chat(),
+            device_id="d1",
+            request_type="camera.capture",
+        )
+    )
+
+    assert result.ok is True
+    assert result.command is not None
+    assert result.command.command_id == "c1"
+    method, url, kwargs = session.requests[0]
+    assert method == "POST"
+    assert url.endswith("/bot/v1/devices/d1/commands")
+    assert kwargs["json"]["request_type"] == "camera.capture"
+    assert kwargs["json"]["params"] == {}
+
+
+def test_get_command_status_maps_unsupported() -> None:
+    session = FakeSession([FakeResponse(400, {"detail": "unsupported_request_type"})])
+    client = _build_client(session)
+
+    result = asyncio.run(client.get_command_status(_dummy_user(), _dummy_chat(), command_id="c1"))
+
+    assert result.ok is False
+    assert result.error_code == ERROR_COMMAND_UNSUPPORTED
+
+
+def test_fetch_command_photo_maps_photo_not_ready() -> None:
+    session = FakeSession([FakeResponse(409, {"detail": "photo_not_ready"})])
+    client = _build_client(session)
+
+    result = asyncio.run(client.fetch_command_photo(_dummy_user(), _dummy_chat(), command_id="c1"))
+
+    assert result.ok is False
+    assert result.error_code == ERROR_COMMAND_PHOTO_NOT_READY

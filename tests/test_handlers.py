@@ -24,6 +24,7 @@ from app.callbacks import (
 from app.main import (
     device_back_callback_handler,
     device_last_callback_handler,
+    device_photo_callback_handler,
     device_select_callback_handler,
     device_status_callback_handler,
     device_tare_cancel_callback_handler,
@@ -57,6 +58,10 @@ from app.oms import (
     DeviceSummary,
     EnsureSessionResult,
     InviteSummary,
+    DeviceCommandResponse,
+    DeviceCommandSubmitResult,
+    DeviceCommandStatusResult,
+    CommandPhotoResult,
     LatestDefectSummary,
     LatestFruitSummary,
     LatestResultReadResult,
@@ -83,6 +88,7 @@ class DummyCallbackMessage:
     def __init__(self, chat_id: int = 200) -> None:
         self.chat = SimpleNamespace(id=chat_id, type="private")
         self.edit_text = AsyncMock()
+        self.answer_photo = AsyncMock()
 
 
 class DummyCallbackQuery:
@@ -108,6 +114,9 @@ class FakeOmsClient:
         latest_result_results: list[LatestResultReadResult] | None = None,
         device_latest_result_results: list[LatestResultReadResult] | None = None,
         revoke_results: list[RevokeMembershipResult] | None = None,
+        command_submit_results: list[object] | None = None,
+        command_status_results: list[object] | None = None,
+        command_photo_results: list[object] | None = None,
     ) -> None:
         self.calls: list[tuple[str, object | None]] = []
         self._ensure_results = ensure_results or [EnsureSessionResult(ok=True, degraded=False, is_banned=False)]
@@ -121,6 +130,9 @@ class FakeOmsClient:
         self._latest_result_results = latest_result_results or [LatestResultReadResult(ok=True)]
         self._device_latest_result_results = device_latest_result_results or [LatestResultReadResult(ok=True)]
         self._revoke_results = revoke_results or [RevokeMembershipResult(ok=True)]
+        self._command_submit_results = command_submit_results or []
+        self._command_status_results = command_status_results or []
+        self._command_photo_results = command_photo_results or []
 
     def _next(self, queue: list[object]) -> object:
         if not queue:
@@ -172,6 +184,18 @@ class FakeOmsClient:
     async def revoke_self_membership(self, from_user, chat, *, store_id: str) -> RevokeMembershipResult:
         self.calls.append(("revoke_self_membership", store_id))
         return self._next(self._revoke_results)
+
+    async def submit_device_command(self, from_user, chat, *, device_id: str, request_type: str, params=None, wait_timeout_ms=None):
+        self.calls.append(("submit_device_command", request_type))
+        return self._next(self._command_submit_results)
+
+    async def get_command_status(self, from_user, chat, *, command_id: str):
+        self.calls.append(("get_command_status", command_id))
+        return self._next(self._command_status_results)
+
+    async def fetch_command_photo(self, from_user, chat, *, command_id: str):
+        self.calls.append(("fetch_command_photo", command_id))
+        return self._next(self._command_photo_results)
 
 
 def _write_catalog(path: str, payload: dict[str, object]) -> None:
@@ -243,6 +267,19 @@ def _catalog_payload() -> dict[str, object]:
         "tare.confirm_unavailable": "TARE CONFIRM UNAVAILABLE",
         "tare.reset_unavailable": "TARE RESET UNAVAILABLE",
         "tare.cancelled": "TARE CANCELLED",
+        "commands.in_flight": "CMD IN FLIGHT",
+        "commands.pending": "CMD PENDING",
+        "commands.failed": "CMD FAILED",
+        "commands.not_found": "CMD NOT FOUND",
+        "commands.unsupported": "CMD UNSUPPORTED",
+        "commands.connector_offline": "CMD OFFLINE",
+        "commands.photo.requesting": "PHOTO REQUESTING",
+        "commands.photo.success": "PHOTO SUCCESS",
+        "commands.photo.ready": "PHOTO READY",
+        "commands.photo.pending": "PHOTO PENDING",
+        "commands.photo.not_found": "PHOTO NOT FOUND",
+        "commands.tare.applying": "TARE APPLYING",
+        "commands.tare.success": "TARE SUCCESS",
         "labels.store": "STORE",
         "labels.device": "DEVICE",
         "labels.online": "ONLINE",
@@ -1077,7 +1114,7 @@ def test_tare_menu_open_and_cancel_flow(tmp_path, monkeypatch) -> None:
                 is_banned=False,
                 linked=True,
                 memberships_count=1,
-                active_store=StoreSummary(id="s1", name="Shop 1", is_active=True),
+                active_store=StoreSummary(id="s1", name="Shop 1", is_active=True, role="operator"),
                 active_device_id="d1",
             ),
             oms_client=open_client,
@@ -1210,6 +1247,132 @@ def test_device_status_callback_handles_device_not_in_active_store(tmp_path, mon
 
     callback_query.message.edit_text.assert_awaited_once_with("DEVICE NOT IN STORE")
     callback_query.answer.assert_awaited_once_with()
+
+
+def _command_response(
+    *,
+    command_id: str = "c1",
+    device_id: str = "d1",
+    store_id: str = "s1",
+    request_type: str = "camera.capture",
+    status: str = "succeeded",
+    error_code: str | None = None,
+) -> DeviceCommandResponse:
+    return DeviceCommandResponse(
+        command_id=command_id,
+        device_id=device_id,
+        store_id=store_id,
+        request_type=request_type,
+        status=status,
+        result=None,
+        error_code=error_code,
+        created_at="2026-03-07T14:05:00Z",
+        completed_at="2026-03-07T14:05:05Z",
+    )
+
+
+def test_photo_command_success_flow(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_device_photo_callback("d1"))
+    oms_client = FakeOmsClient(
+        device_status_results=[_device_status_result(last_seen_at=None)],
+        command_submit_results=[
+            DeviceCommandSubmitResult(ok=True, command=_command_response())
+        ],
+        command_photo_results=[CommandPhotoResult(ok=True, payload=b"img", content_type="image/jpeg")],
+    )
+
+    asyncio.run(
+        device_photo_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(
+                ok=True,
+                degraded=False,
+                is_banned=False,
+                linked=True,
+                memberships_count=1,
+                active_store=StoreSummary(id="s1", name="Shop 1", is_active=True, role="operator"),
+                active_device_id="d1",
+            ),
+            oms_client=oms_client,
+        )
+    )
+
+    assert callback_query.message.edit_text.await_args_list[0].args[0] == "PHOTO REQUESTING"
+    assert callback_query.message.answer_photo.await_count == 1
+    assert callback_query.message.answer_photo.await_args.kwargs["caption"] == "PHOTO READY"
+
+
+def test_tare_command_pending_flow(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_device_tare_confirm_callback("d1"))
+    oms_client = FakeOmsClient(
+        device_status_results=[_device_status_result(last_seen_at=None)],
+        command_submit_results=[
+            DeviceCommandSubmitResult(
+                ok=True,
+                command=_command_response(request_type="tare", status="running"),
+            )
+        ],
+        command_status_results=[
+            DeviceCommandStatusResult(
+                ok=True,
+                command=_command_response(request_type="tare", status="running"),
+            )
+        ],
+    )
+
+    asyncio.run(
+        device_tare_confirm_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(
+                ok=True,
+                degraded=False,
+                is_banned=False,
+                linked=True,
+                memberships_count=1,
+                active_store=StoreSummary(id="s1", name="Shop 1", is_active=True, role="operator"),
+                active_device_id="d1",
+            ),
+            oms_client=oms_client,
+        )
+    )
+
+    assert callback_query.message.edit_text.await_args_list[0].args[0] == "TARE APPLYING"
+    assert "CMD PENDING" in callback_query.message.edit_text.await_args_list[-1].args[0]
+
+
+def test_photo_button_hidden_for_viewer_role(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_device_select_callback("d1"))
+    oms_client = FakeOmsClient(
+        set_active_device_results=[SetActiveDeviceResult(ok=True, active_store_id="s1", active_device_id="d1")],
+        device_status_results=[_device_status_result(last_seen_at=None)],
+    )
+
+    asyncio.run(
+        device_select_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(
+                ok=True,
+                degraded=False,
+                is_banned=False,
+                linked=True,
+                memberships_count=1,
+                active_store=StoreSummary(id="s1", name="Shop 1", is_active=True, role="viewer"),
+                active_device_id="d1",
+            ),
+            oms_client=oms_client,
+        )
+    )
+
+    markup = callback_query.message.edit_text.await_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert build_device_photo_callback("d1") not in callback_data
+    assert build_device_tare_menu_callback("d1") not in callback_data
 
 
 def test_device_last_callback_requires_selected_device_context(tmp_path, monkeypatch) -> None:
