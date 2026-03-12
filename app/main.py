@@ -484,9 +484,9 @@ async def _load_selected_device_card_text(
 
 async def _send_message(message: Message, text: str, *, reply_markup: object | None = None) -> None:
     if reply_markup is None:
-        await message.answer(text)
+        await message.answer(text, parse_mode="Markdown")
         return
-    await message.answer(text, reply_markup=reply_markup)
+    await message.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def _edit_callback_message(
@@ -498,9 +498,9 @@ async def _edit_callback_message(
     if callback_query.message is None:
         return
     if reply_markup is None:
-        await callback_query.message.edit_text(text)
+        await callback_query.message.edit_text(text, parse_mode="Markdown")
         return
-    await callback_query.message.edit_text(text, reply_markup=reply_markup)
+    await callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def _reply_blocked_message(message: Message, session_state: EnsureSessionResult | None) -> bool:
@@ -1181,6 +1181,7 @@ async def device_photo_callback_handler(
         await callback_query.message.answer_photo(
             BufferedInputFile(photo_result.payload, filename="photo.jpg"),
             caption=msg("commands.photo.ready"),
+            parse_mode="Markdown",
         )
         card_text, status = await _load_selected_device_card_text(
             oms_client,
