@@ -32,8 +32,11 @@ ERROR_NOTIFICATION_IMAGE_FAILED = "notification_image_failed"
 ERROR_RESULT_NOT_FOUND = "result_not_found"
 ERROR_REVOKED = "revoked"
 ERROR_STORE_INACTIVE = "store_inactive"
+ERROR_STORE_NOT_AVAILABLE = "store_not_available"
 ERROR_STORE_HAS_NO_DEVICES = "store_has_no_devices"
 ERROR_STORE_NOT_FOUND = "store_not_found"
+ERROR_NOTIFICATIONS_NOT_AVAILABLE = "notifications_not_available"
+ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE = "notification_option_not_available"
 ERROR_UNAVAILABLE = "unavailable"
 ERROR_UNKNOWN = "unknown"
 
@@ -78,6 +81,48 @@ class StoresResult:
     @property
     def has_multiple_stores(self) -> bool:
         return len(self.stores) > 1
+
+
+@dataclass(frozen=True)
+class NotificationSettingsStoreSummary:
+    store_id: str
+    store_name: str
+
+
+@dataclass(frozen=True)
+class NotificationSettingsStoresResult:
+    ok: bool
+    stores: tuple[NotificationSettingsStoreSummary, ...] = ()
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class StoreNotificationPreferences:
+    notifications_enabled: bool
+    device_status_enabled: bool
+    defect_detected_enabled: bool
+
+
+@dataclass(frozen=True)
+class StoreNotificationCapabilities:
+    can_access_notifications: bool
+    can_subscribe_device_status: bool
+    can_subscribe_defect_detected: bool
+
+
+@dataclass(frozen=True)
+class StoreNotificationSettings:
+    store_id: str
+    store_name: str
+    preferences: StoreNotificationPreferences
+    capabilities: StoreNotificationCapabilities
+
+
+@dataclass(frozen=True)
+class StoreNotificationSettingsResult:
+    ok: bool
+    settings: StoreNotificationSettings | None = None
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -404,6 +449,19 @@ def _map_command_error(status: int, payload: Any) -> str:
     return ERROR_UNKNOWN
 
 
+def _map_notification_settings_error(status: int, payload: Any) -> str:
+    tokens = set(_extract_error_tokens(payload))
+    if {"store_not_available"} & tokens or status == 404:
+        return ERROR_STORE_NOT_AVAILABLE
+    if {"notifications_not_available"} & tokens:
+        return ERROR_NOTIFICATIONS_NOT_AVAILABLE
+    if {"notification_option_not_available"} & tokens:
+        return ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE
+    if status == 403:
+        return ERROR_PERMISSION_DENIED
+    return ERROR_UNKNOWN
+
+
 def _parse_command_payload(payload: Any) -> DeviceCommandResponse | None:
     payload_dict = _as_dict(payload)
     if not payload_dict:
@@ -455,6 +513,59 @@ def _parse_store_list(payload: Any) -> tuple[StoreSummary, ...]:
         if store is not None:
             stores.append(store)
     return tuple(stores)
+
+
+def _parse_notification_settings_store_list(payload: Any) -> tuple[NotificationSettingsStoreSummary, ...]:
+    payload_dict = _as_dict(payload)
+    raw_items = _as_list(payload_dict.get("items"))
+    stores: list[NotificationSettingsStoreSummary] = []
+    for raw_item in raw_items:
+        item = _as_dict(raw_item)
+        store_id = _string_or_none(item.get("store_id"))
+        if store_id is None:
+            continue
+        store_name = _string_or_none(item.get("store_name")) or store_id
+        stores.append(NotificationSettingsStoreSummary(store_id=store_id, store_name=store_name))
+    return tuple(stores)
+
+
+def _parse_store_notification_settings(payload: Any) -> StoreNotificationSettings | None:
+    payload_dict = _as_dict(payload)
+    if not payload_dict:
+        return None
+
+    store_id = _string_or_none(payload_dict.get("store_id"))
+    if store_id is None:
+        return None
+
+    store_name = _string_or_none(payload_dict.get("store_name")) or store_id
+    preferences_payload = _as_dict(payload_dict.get("preferences"))
+    capabilities_payload = _as_dict(payload_dict.get("capabilities"))
+    if not preferences_payload or not capabilities_payload:
+        return None
+
+    preferences = StoreNotificationPreferences(
+        notifications_enabled=_bool_from_any(preferences_payload.get("notifications_enabled"), default=False),
+        device_status_enabled=_bool_from_any(preferences_payload.get("device_status_enabled"), default=False),
+        defect_detected_enabled=_bool_from_any(preferences_payload.get("defect_detected_enabled"), default=False),
+    )
+    capabilities = StoreNotificationCapabilities(
+        can_access_notifications=_bool_from_any(capabilities_payload.get("can_access_notifications"), default=False),
+        can_subscribe_device_status=_bool_from_any(
+            capabilities_payload.get("can_subscribe_device_status"),
+            default=False,
+        ),
+        can_subscribe_defect_detected=_bool_from_any(
+            capabilities_payload.get("can_subscribe_defect_detected"),
+            default=False,
+        ),
+    )
+    return StoreNotificationSettings(
+        store_id=store_id,
+        store_name=store_name,
+        preferences=preferences,
+        capabilities=capabilities,
+    )
 
 
 def _extract_flat_active_store(payload: Any) -> StoreSummary | None:
@@ -946,6 +1057,112 @@ class OmsClient:
         active_store = _extract_active_store(raw_response.payload, stores)
         stores, active_store = _sync_active_store(stores, active_store)
         return StoresResult(ok=True, stores=stores, active_store=active_store)
+
+    async def get_notification_settings_stores(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+    ) -> NotificationSettingsStoresResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return NotificationSettingsStoresResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        raw_response = await self._request_json(
+            "GET",
+            "/notifications/settings/stores",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            params=payload,
+        )
+        if raw_response is None or raw_response.status >= 500:
+            return NotificationSettingsStoresResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        if raw_response.status >= 400:
+            return NotificationSettingsStoresResult(
+                ok=False,
+                error_code=_map_notification_settings_error(raw_response.status, raw_response.payload),
+            )
+
+        stores = _parse_notification_settings_store_list(raw_response.payload)
+        return NotificationSettingsStoresResult(ok=True, stores=stores)
+
+    async def get_store_notification_settings(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        store_id: str,
+    ) -> StoreNotificationSettingsResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        raw_response = await self._request_json(
+            "GET",
+            f"/notifications/settings/stores/{store_id}",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            params=payload,
+        )
+        if raw_response is None or raw_response.status >= 500:
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        if raw_response.status >= 400:
+            return StoreNotificationSettingsResult(
+                ok=False,
+                error_code=_map_notification_settings_error(raw_response.status, raw_response.payload),
+            )
+
+        settings = _parse_store_notification_settings(raw_response.payload)
+        if settings is None:
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNKNOWN)
+        return StoreNotificationSettingsResult(ok=True, settings=settings)
+
+    async def update_store_notification_settings(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        store_id: str,
+        notifications_enabled: bool | None = None,
+        device_status_enabled: bool | None = None,
+        defect_detected_enabled: bool | None = None,
+    ) -> StoreNotificationSettingsResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        request_payload: dict[str, Any] = {**payload}
+        if notifications_enabled is not None:
+            request_payload["notifications_enabled"] = notifications_enabled
+        if device_status_enabled is not None:
+            request_payload["device_status_enabled"] = device_status_enabled
+        if defect_detected_enabled is not None:
+            request_payload["defect_detected_enabled"] = defect_detected_enabled
+        if len(request_payload) == len(payload):
+            LOGGER.warning("OMS notification settings update skipped: no fields provided store_id=%s", store_id)
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNKNOWN)
+
+        raw_response = await self._request_json(
+            "PUT",
+            f"/notifications/settings/stores/{store_id}",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            json_payload=request_payload,
+        )
+        if raw_response is None or raw_response.status >= 500:
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        if raw_response.status >= 400:
+            return StoreNotificationSettingsResult(
+                ok=False,
+                error_code=_map_notification_settings_error(raw_response.status, raw_response.payload),
+            )
+
+        settings = _parse_store_notification_settings(raw_response.payload)
+        if settings is None:
+            return StoreNotificationSettingsResult(ok=False, error_code=ERROR_UNKNOWN)
+        return StoreNotificationSettingsResult(ok=True, settings=settings)
 
     async def list_store_devices(
         self,

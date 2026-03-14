@@ -4,8 +4,9 @@ Telegram adapter microservice based on `aiogram` with:
 - DM-only behavior (group, supergroup, and channel updates are ignored)
 - OMS session ensure call for private messages and callback updates
 - Telegram command menu configured from `config/messages.ru.json`
-- `/start`, `/help`, `/ping`, `/link`, `/stores`, `/devices`, `/last`, `/invite`, `/unlink`
+- `/start`, `/help`, `/ping`, `/link`, `/stores`, `/devices`, `/last`, `/invite`, `/unlink`, `/settings`
 - inline callback flows for store switching, device selection, selected-device actions, tare submenu, and unlink confirmation
+- inline callback flow for per-store notification settings management
 - internal notifications endpoint for OMS push batches: `POST /internal/notifications/push`
 - defect notifications with `Show image` callback that fetches image bytes from OMS and sends a new Telegram photo message
 - environment-driven config
@@ -49,6 +50,7 @@ After startup, the bot responds to:
 - `/last`
 - `/invite`
 - `/unlink`
+- `/settings`
 
 Bot command menu entries are loaded from `bot_commands` in `config/messages.ru.json`.
 
@@ -63,6 +65,11 @@ Bot command menu entries are loaded from `bot_commands` in `config/messages.ru.j
 - `Photo` and `Tare` callbacks submit OMS commands and render follow-up results.
 - `/invite` creates an invite for the current active store.
 - `/unlink` asks for explicit confirmation before revoking the selected store membership.
+- `/settings` opens a generic settings screen with `Notification settings`.
+- `Notification settings` always fetches fresh OMS store eligibility via `GET /bot/v1/notifications/settings/stores`.
+- store selection loads per-store settings via `GET /bot/v1/notifications/settings/stores/{store_id}`.
+- preference toggles use `PUT /bot/v1/notifications/settings/stores/{store_id}` and re-render from OMS response.
+- when master notifications are off, subtype rows/buttons are hidden in bot UI (stored OMS subtype values are preserved and shown again when master is on).
 
 ## Internal Notifications (Milestone 6)
 
@@ -84,11 +91,14 @@ Bot command menu entries are loaded from `bot_commands` in `config/messages.ru.j
 - Other bot endpoints use the OMS bot-actor DTOs with `provider` and `provider_user_id`, plus route-specific fields such as `invite_code` or `store_id`.
 - `POST /bot/v1/invites/redeem` uses `invite_code` and may return `already_linked: true` in a successful response.
 - `GET /bot/v1/stores` returns `items[]` with `display_name`, `store_is_active`, and `is_active_store`.
+- `GET /bot/v1/notifications/settings/stores` returns OMS-eligible stores for per-store notification settings.
+- `GET /bot/v1/notifications/settings/stores/{store_id}` returns per-store preferences and capabilities.
+- `PUT /bot/v1/notifications/settings/stores/{store_id}` accepts partial preference updates and returns refreshed store settings.
 - `GET /bot/v1/stores/{store_id}/devices` returns `items[]` with `device_id`, `display_name`, and `online`.
 - `POST /bot/v1/context/active_device` sets the OMS-side active device for the current user context.
 - `GET /bot/v1/devices/{device_id}/status` and `GET /bot/v1/devices/{device_id}/results/last` are active-store scoped.
 - `GET /bot/v1/results/last` returns the latest detection across all devices in the active store.
-- Bot-side error handling follows OMS `detail` strings such as `invite_not_found`, `invite_expired`, `invite_revoked`, `invite_exhausted`, `permission_denied`, `no_active_store`, `store_inactive`, `membership_not_found`, `device_not_in_active_store`, `store_has_no_devices`, and `result_not_found`.
+- Bot-side error handling follows OMS `detail` strings such as `invite_not_found`, `invite_expired`, `invite_revoked`, `invite_exhausted`, `permission_denied`, `no_active_store`, `store_inactive`, `membership_not_found`, `device_not_in_active_store`, `store_has_no_devices`, `result_not_found`, `store_not_available`, `notifications_not_available`, and `notification_option_not_available`.
 
 ## Tests
 

@@ -15,6 +15,13 @@ from app.callbacks import (
     DEVICE_BACK,
     DEVICE_LAST_PREFIX,
     NOTIFICATION_IMAGE_PREFIX,
+    SETTINGS_NOTIFICATIONS_BACK_TO_PICKER,
+    SETTINGS_NOTIFICATIONS_BACK_TO_SETTINGS,
+    SETTINGS_NOTIFICATIONS_OPEN,
+    SETTINGS_NOTIFICATIONS_STORE_PREFIX,
+    SETTINGS_NOTIFICATIONS_TOGGLE_DEFECT_PREFIX,
+    SETTINGS_NOTIFICATIONS_TOGGLE_DEVICE_STATUS_PREFIX,
+    SETTINGS_NOTIFICATIONS_TOGGLE_MASTER_PREFIX,
     DEVICE_PHOTO_PREFIX,
     DEVICE_SELECT_PREFIX,
     DEVICE_STATUS_PREFIX,
@@ -38,6 +45,10 @@ from app.callbacks import (
     parse_device_tare_menu_callback,
     parse_device_tare_reset_callback,
     parse_notification_image_callback,
+    parse_settings_notifications_store_callback,
+    parse_settings_notifications_toggle_defect_callback,
+    parse_settings_notifications_toggle_device_status_callback,
+    parse_settings_notifications_toggle_master_callback,
     parse_store_switch_callback,
     parse_unlink_confirm_callback,
     parse_unlink_pick_callback,
@@ -47,8 +58,11 @@ from app.internal_notifications import InternalNotificationsServer
 from app.keyboards import (
     build_device_list_keyboard,
     build_device_tare_keyboard,
+    build_notification_settings_store_picker_keyboard,
     build_selected_device_keyboard,
+    build_settings_keyboard,
     build_store_switch_keyboard,
+    build_store_notification_settings_keyboard,
     build_unlink_confirmation_keyboard,
     build_unlink_pick_keyboard,
 )
@@ -68,12 +82,15 @@ from app.oms import (
     ERROR_COMMAND_PHOTO_NOT_FOUND,
     ERROR_COMMAND_PHOTO_NOT_READY,
     ERROR_COMMAND_UNSUPPORTED,
+    ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
     ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED,
     ERROR_NOTIFICATION_IMAGE_FAILED,
     ERROR_NOTIFICATION_IMAGE_UNAVAILABLE,
+    ERROR_NOTIFICATIONS_NOT_AVAILABLE,
     ERROR_RESULT_NOT_FOUND,
     ERROR_REVOKED,
     ERROR_STORE_INACTIVE,
+    ERROR_STORE_NOT_AVAILABLE,
     ERROR_STORE_HAS_NO_DEVICES,
     ERROR_STORE_NOT_FOUND,
     ERROR_UNAVAILABLE,
@@ -82,6 +99,7 @@ from app.oms import (
     EnsureSessionResult,
     InviteSummary,
     LatestResultSummary,
+    StoreNotificationSettings,
     OmsClient,
     DeviceCommandResponse,
     StoreSummary,
@@ -267,6 +285,47 @@ def _format_defect_summary(result: LatestResultSummary) -> str:
 
 def _build_devices_text(store: StoreSummary) -> str:
     return msg("devices.choose", store_name=store.name)
+
+
+def _format_on_off(value: bool) -> str:
+    return msg("settings.state.on") if value else msg("settings.state.off")
+
+
+def _build_settings_text() -> str:
+    return msg("settings.title")
+
+
+def _build_notification_settings_picker_text() -> str:
+    return msg("settings.notifications.choose_store")
+
+
+def _build_store_notification_settings_text(settings: StoreNotificationSettings) -> str:
+    lines = [
+        msg("settings.notifications.title"),
+        f"{msg('labels.store')}: {settings.store_name}",
+        "",
+        f"- {msg('settings.notifications.all')}: {_format_on_off(settings.preferences.notifications_enabled)}",
+    ]
+    if settings.preferences.notifications_enabled:
+        lines.append(
+            f"- {msg('settings.notifications.device_status')}: {_format_on_off(settings.preferences.device_status_enabled)}"
+        )
+        lines.append(
+            f"- {msg('settings.notifications.defect_detected')}: {_format_on_off(settings.preferences.defect_detected_enabled)}"
+        )
+    return "\n".join(lines)
+
+
+def _build_notification_settings_error_text(error_code: str | None) -> str:
+    if error_code == ERROR_STORE_NOT_AVAILABLE:
+        return msg("settings.notifications.store_not_available")
+    if error_code == ERROR_NOTIFICATIONS_NOT_AVAILABLE:
+        return msg("settings.notifications.not_available")
+    if error_code == ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE:
+        return msg("settings.notifications.option_not_available")
+    if error_code == ERROR_UNAVAILABLE:
+        return msg("errors.oms_unavailable")
+    return msg("errors.generic")
 
 
 def _build_selected_device_card_text(
@@ -560,6 +619,188 @@ async def _require_oms_client_for_callback(
     return None
 
 
+async def _render_notification_settings_store_picker(
+    callback_query: CallbackQuery,
+    oms_client: OmsClient,
+) -> bool:
+    provider_user_id = callback_query.from_user.id if callback_query.from_user else "unknown"
+    stores_result = await oms_client.get_notification_settings_stores(
+        callback_query.from_user,
+        _callback_chat(callback_query),
+    )
+    if not stores_result.ok:
+        LOGGER.warning(
+            "notification_settings_store_list_failed provider_user_id=%s error_code=%s",
+            provider_user_id,
+            stores_result.error_code,
+        )
+        if stores_result.error_code == ERROR_UNAVAILABLE:
+            await callback_query.answer(msg("errors.oms_unavailable"), show_alert=True)
+            return False
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return False
+
+    LOGGER.info(
+        "notification_settings_store_list_succeeded provider_user_id=%s count=%s",
+        provider_user_id,
+        len(stores_result.stores),
+    )
+    if not stores_result.stores:
+        await _edit_callback_message(callback_query, msg("settings.notifications.no_stores"))
+        await callback_query.answer()
+        return False
+
+    await _edit_callback_message(
+        callback_query,
+        _build_notification_settings_picker_text(),
+        reply_markup=build_notification_settings_store_picker_keyboard(stores_result.stores),
+    )
+    await callback_query.answer()
+    return True
+
+
+async def _load_store_notification_settings(
+    callback_query: CallbackQuery,
+    oms_client: OmsClient,
+    store_id: str,
+) -> StoreNotificationSettings | None:
+    provider_user_id = callback_query.from_user.id if callback_query.from_user else "unknown"
+    LOGGER.info(
+        "notification_settings_fetch_started provider_user_id=%s store_id=%s",
+        provider_user_id,
+        store_id,
+    )
+    settings_result = await oms_client.get_store_notification_settings(
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        store_id=store_id,
+    )
+    if not settings_result.ok:
+        LOGGER.warning(
+            "notification_settings_fetch_failed provider_user_id=%s store_id=%s error_code=%s",
+            provider_user_id,
+            store_id,
+            settings_result.error_code,
+        )
+        if settings_result.error_code in {
+            ERROR_STORE_NOT_AVAILABLE,
+            ERROR_NOTIFICATIONS_NOT_AVAILABLE,
+            ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
+        }:
+            LOGGER.info(
+                "notification_settings_stale_callback_handled provider_user_id=%s store_id=%s error_code=%s",
+                provider_user_id,
+                store_id,
+                settings_result.error_code,
+            )
+        if settings_result.error_code == ERROR_UNAVAILABLE:
+            await callback_query.answer(msg("errors.oms_unavailable"), show_alert=True)
+            return None
+        await _edit_callback_message(callback_query, _build_notification_settings_error_text(settings_result.error_code))
+        await callback_query.answer()
+        return None
+
+    if settings_result.settings is None:
+        LOGGER.warning(
+            "notification_settings_fetch_failed provider_user_id=%s store_id=%s error_code=%s",
+            provider_user_id,
+            store_id,
+            ERROR_UNKNOWN,
+        )
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return None
+
+    LOGGER.info(
+        "notification_settings_fetch_succeeded provider_user_id=%s store_id=%s",
+        provider_user_id,
+        store_id,
+    )
+    return settings_result.settings
+
+
+async def _toggle_store_notification_preference(
+    callback_query: CallbackQuery,
+    oms_client: OmsClient,
+    *,
+    store_id: str,
+    field_name: str,
+) -> None:
+    current_settings = await _load_store_notification_settings(callback_query, oms_client, store_id)
+    if current_settings is None:
+        return
+
+    update_kwargs: dict[str, bool] = {}
+    if field_name == "notifications_enabled":
+        update_kwargs["notifications_enabled"] = not current_settings.preferences.notifications_enabled
+    elif field_name == "device_status_enabled":
+        update_kwargs["device_status_enabled"] = not current_settings.preferences.device_status_enabled
+    elif field_name == "defect_detected_enabled":
+        update_kwargs["defect_detected_enabled"] = not current_settings.preferences.defect_detected_enabled
+    else:
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return
+
+    provider_user_id = callback_query.from_user.id if callback_query.from_user else "unknown"
+    next_value = next(iter(update_kwargs.values()))
+    LOGGER.info(
+        "notification_settings_update_started provider_user_id=%s store_id=%s field=%s next_value=%s",
+        provider_user_id,
+        store_id,
+        field_name,
+        next_value,
+    )
+    update_result = await oms_client.update_store_notification_settings(
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        store_id=store_id,
+        notifications_enabled=update_kwargs.get("notifications_enabled"),
+        device_status_enabled=update_kwargs.get("device_status_enabled"),
+        defect_detected_enabled=update_kwargs.get("defect_detected_enabled"),
+    )
+    if not update_result.ok:
+        LOGGER.warning(
+            "notification_settings_update_failed provider_user_id=%s store_id=%s field=%s error_code=%s",
+            provider_user_id,
+            store_id,
+            field_name,
+            update_result.error_code,
+        )
+        if update_result.error_code in {
+            ERROR_STORE_NOT_AVAILABLE,
+            ERROR_NOTIFICATIONS_NOT_AVAILABLE,
+            ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
+        }:
+            LOGGER.info(
+                "notification_settings_stale_callback_handled provider_user_id=%s store_id=%s error_code=%s",
+                provider_user_id,
+                store_id,
+                update_result.error_code,
+            )
+        if update_result.error_code == ERROR_UNAVAILABLE:
+            await callback_query.answer(msg("errors.oms_unavailable"), show_alert=True)
+            return
+        await _edit_callback_message(callback_query, _build_notification_settings_error_text(update_result.error_code))
+        await callback_query.answer()
+        return
+
+    if update_result.settings is None:
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return
+
+    LOGGER.info(
+        "notification_settings_update_succeeded provider_user_id=%s store_id=%s field=%s",
+        provider_user_id,
+        store_id,
+        field_name,
+    )
+    await _edit_callback_message(
+        callback_query,
+        _build_store_notification_settings_text(update_result.settings),
+        reply_markup=build_store_notification_settings_keyboard(update_result.settings),
+    )
+    await callback_query.answer()
+
+
 @router.message(Command("start"))
 async def start_handler(message: Message, session_state: EnsureSessionResult | None = None) -> None:
     user_id = message.from_user.id if message.from_user else "unknown"
@@ -671,6 +912,24 @@ async def stores_handler(
 
     reply_markup = build_store_switch_keyboard(stores_result.stores) if stores_result.has_multiple_stores else None
     await _send_message(message, _build_stores_text(stores_result), reply_markup=reply_markup)
+
+
+@router.message(Command("settings"))
+async def settings_handler(
+    message: Message,
+    session_state: EnsureSessionResult | None = None,
+) -> None:
+    user_id = message.from_user.id if message.from_user else "unknown"
+    LOGGER.info("Handling /settings from user_id=%s", user_id)
+
+    if await _reply_blocked_message(message, session_state):
+        return
+
+    await _send_message(
+        message,
+        _build_settings_text(),
+        reply_markup=build_settings_keyboard(),
+    )
 
 
 @router.message(Command("devices"))
@@ -904,6 +1163,164 @@ async def store_switch_callback_handler(
     reply_markup = build_store_switch_keyboard(stores_result.stores) if stores_result.has_multiple_stores else None
     await _edit_callback_message(callback_query, callback_text, reply_markup=reply_markup)
     await callback_query.answer()
+
+
+@router.callback_query(F.data == SETTINGS_NOTIFICATIONS_OPEN)
+async def settings_notifications_open_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    provider_user_id = callback_query.from_user.id if callback_query.from_user else "unknown"
+    LOGGER.info("notification_settings_entry_opened provider_user_id=%s", provider_user_id)
+    await _render_notification_settings_store_picker(callback_query, oms_client)
+
+
+@router.callback_query(F.data == SETTINGS_NOTIFICATIONS_BACK_TO_SETTINGS)
+async def settings_notifications_back_to_settings_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    await _edit_callback_message(
+        callback_query,
+        _build_settings_text(),
+        reply_markup=build_settings_keyboard(),
+    )
+    await callback_query.answer()
+
+
+@router.callback_query(F.data == SETTINGS_NOTIFICATIONS_BACK_TO_PICKER)
+async def settings_notifications_back_to_picker_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    await _render_notification_settings_store_picker(callback_query, oms_client)
+
+
+@router.callback_query(F.data.startswith(SETTINGS_NOTIFICATIONS_STORE_PREFIX))
+async def settings_notifications_store_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    store_id = parse_settings_notifications_store_callback(callback_query.data)
+    if store_id is None:
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return
+
+    settings = await _load_store_notification_settings(callback_query, oms_client, store_id)
+    if settings is None:
+        return
+
+    await _edit_callback_message(
+        callback_query,
+        _build_store_notification_settings_text(settings),
+        reply_markup=build_store_notification_settings_keyboard(settings),
+    )
+    await callback_query.answer()
+
+
+@router.callback_query(F.data.startswith(SETTINGS_NOTIFICATIONS_TOGGLE_MASTER_PREFIX))
+async def settings_notifications_toggle_master_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    store_id = parse_settings_notifications_toggle_master_callback(callback_query.data)
+    if store_id is None:
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return
+
+    await _toggle_store_notification_preference(
+        callback_query,
+        oms_client,
+        store_id=store_id,
+        field_name="notifications_enabled",
+    )
+
+
+@router.callback_query(F.data.startswith(SETTINGS_NOTIFICATIONS_TOGGLE_DEVICE_STATUS_PREFIX))
+async def settings_notifications_toggle_device_status_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    store_id = parse_settings_notifications_toggle_device_status_callback(callback_query.data)
+    if store_id is None:
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return
+
+    await _toggle_store_notification_preference(
+        callback_query,
+        oms_client,
+        store_id=store_id,
+        field_name="device_status_enabled",
+    )
+
+
+@router.callback_query(F.data.startswith(SETTINGS_NOTIFICATIONS_TOGGLE_DEFECT_PREFIX))
+async def settings_notifications_toggle_defect_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    store_id = parse_settings_notifications_toggle_defect_callback(callback_query.data)
+    if store_id is None:
+        await callback_query.answer(msg("errors.generic"), show_alert=True)
+        return
+
+    await _toggle_store_notification_preference(
+        callback_query,
+        oms_client,
+        store_id=store_id,
+        field_name="defect_detected_enabled",
+    )
 
 
 @router.callback_query(F.data.startswith(DEVICE_SELECT_PREFIX))

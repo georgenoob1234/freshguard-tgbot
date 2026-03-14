@@ -8,11 +8,14 @@ from app.oms import (
     ERROR_DEVICE_NOT_IN_ACTIVE_STORE,
     ERROR_INVALID_CODE,
     ERROR_NO_ACTIVE_STORE,
+    ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
     ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED,
     ERROR_NOTIFICATION_IMAGE_UNAVAILABLE,
+    ERROR_NOTIFICATIONS_NOT_AVAILABLE,
     ERROR_NOT_LINKED,
     ERROR_PERMISSION_DENIED,
     ERROR_RESULT_NOT_FOUND,
+    ERROR_STORE_NOT_AVAILABLE,
     ERROR_STORE_INACTIVE,
     ERROR_STORE_HAS_NO_DEVICES,
     ERROR_COMMAND_PHOTO_NOT_READY,
@@ -598,3 +601,169 @@ def test_fetch_notification_result_image_maps_not_found() -> None:
 
     assert result.ok is False
     assert result.error_code == ERROR_NOTIFICATION_IMAGE_UNAVAILABLE
+
+
+def test_get_notification_settings_stores_parses_items() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "items": [
+                        {"store_id": "s1", "store_name": "Main Store"},
+                        {"store_id": "s2", "store_name": "Second Store"},
+                    ]
+                },
+            )
+        ]
+    )
+    client = _build_client(session)
+
+    result = asyncio.run(client.get_notification_settings_stores(_dummy_user(), _dummy_chat()))
+
+    assert result.ok is True
+    assert [(store.store_id, store.store_name) for store in result.stores] == [
+        ("s1", "Main Store"),
+        ("s2", "Second Store"),
+    ]
+    method, url, kwargs = session.requests[0]
+    assert method == "GET"
+    assert url.endswith("/bot/v1/notifications/settings/stores")
+    assert kwargs["params"] == {"provider": "telegram", "provider_user_id": "100"}
+
+
+def test_get_store_notification_settings_parses_preferences_and_capabilities() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "store_id": "s1",
+                    "store_name": "Main Store",
+                    "preferences": {
+                        "notifications_enabled": True,
+                        "device_status_enabled": False,
+                        "defect_detected_enabled": True,
+                    },
+                    "capabilities": {
+                        "can_access_notifications": True,
+                        "can_subscribe_device_status": True,
+                        "can_subscribe_defect_detected": False,
+                    },
+                },
+            )
+        ]
+    )
+    client = _build_client(session)
+
+    result = asyncio.run(client.get_store_notification_settings(_dummy_user(), _dummy_chat(), store_id="s1"))
+
+    assert result.ok is True
+    assert result.settings is not None
+    assert result.settings.store_id == "s1"
+    assert result.settings.store_name == "Main Store"
+    assert result.settings.preferences.notifications_enabled is True
+    assert result.settings.preferences.device_status_enabled is False
+    assert result.settings.preferences.defect_detected_enabled is True
+    assert result.settings.capabilities.can_access_notifications is True
+    assert result.settings.capabilities.can_subscribe_device_status is True
+    assert result.settings.capabilities.can_subscribe_defect_detected is False
+    method, url, kwargs = session.requests[0]
+    assert method == "GET"
+    assert url.endswith("/bot/v1/notifications/settings/stores/s1")
+    assert kwargs["params"] == {"provider": "telegram", "provider_user_id": "100"}
+
+
+def test_update_store_notification_settings_sends_partial_payload() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                {
+                    "store_id": "s1",
+                    "store_name": "Main Store",
+                    "preferences": {
+                        "notifications_enabled": True,
+                        "device_status_enabled": False,
+                        "defect_detected_enabled": True,
+                    },
+                    "capabilities": {
+                        "can_access_notifications": True,
+                        "can_subscribe_device_status": True,
+                        "can_subscribe_defect_detected": True,
+                    },
+                },
+            )
+        ]
+    )
+    client = _build_client(session)
+
+    result = asyncio.run(
+        client.update_store_notification_settings(
+            _dummy_user(),
+            _dummy_chat(),
+            store_id="s1",
+            device_status_enabled=False,
+        )
+    )
+
+    assert result.ok is True
+    method, url, kwargs = session.requests[0]
+    assert method == "PUT"
+    assert url.endswith("/bot/v1/notifications/settings/stores/s1")
+    assert kwargs["json"] == {
+        "provider": "telegram",
+        "provider_user_id": "100",
+        "device_status_enabled": False,
+    }
+
+
+def test_update_store_notification_settings_maps_store_not_available() -> None:
+    session = FakeSession([FakeResponse(404, {"detail": "store_not_available"})])
+    client = _build_client(session)
+
+    result = asyncio.run(
+        client.update_store_notification_settings(
+            _dummy_user(),
+            _dummy_chat(),
+            store_id="s1",
+            notifications_enabled=True,
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == ERROR_STORE_NOT_AVAILABLE
+
+
+def test_update_store_notification_settings_maps_notifications_not_available() -> None:
+    session = FakeSession([FakeResponse(403, {"detail": "notifications_not_available"})])
+    client = _build_client(session)
+
+    result = asyncio.run(
+        client.update_store_notification_settings(
+            _dummy_user(),
+            _dummy_chat(),
+            store_id="s1",
+            notifications_enabled=True,
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == ERROR_NOTIFICATIONS_NOT_AVAILABLE
+
+
+def test_update_store_notification_settings_maps_option_not_available() -> None:
+    session = FakeSession([FakeResponse(403, {"detail": "notification_option_not_available"})])
+    client = _build_client(session)
+
+    result = asyncio.run(
+        client.update_store_notification_settings(
+            _dummy_user(),
+            _dummy_chat(),
+            store_id="s1",
+            defect_detected_enabled=True,
+        )
+    )
+
+    assert result.ok is False
+    assert result.error_code == ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE

@@ -10,6 +10,13 @@ from app.callbacks import (
     build_device_back_callback,
     build_device_last_callback,
     build_notification_image_callback,
+    build_settings_notifications_back_to_picker_callback,
+    build_settings_notifications_back_to_settings_callback,
+    build_settings_notifications_open_callback,
+    build_settings_notifications_store_callback,
+    build_settings_notifications_toggle_defect_callback,
+    build_settings_notifications_toggle_device_status_callback,
+    build_settings_notifications_toggle_master_callback,
     build_device_photo_callback,
     build_device_select_callback,
     build_device_status_callback,
@@ -38,6 +45,14 @@ from app.main import (
     last_handler,
     link_handler,
     ping_handler,
+    settings_handler,
+    settings_notifications_back_to_picker_callback_handler,
+    settings_notifications_back_to_settings_callback_handler,
+    settings_notifications_open_callback_handler,
+    settings_notifications_store_callback_handler,
+    settings_notifications_toggle_defect_callback_handler,
+    settings_notifications_toggle_device_status_callback_handler,
+    settings_notifications_toggle_master_callback_handler,
     start_handler,
     store_switch_callback_handler,
     stores_handler,
@@ -48,11 +63,14 @@ from app.main import (
 )
 from app.oms import (
     ERROR_DEVICE_NOT_IN_ACTIVE_STORE,
+    ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
     ERROR_NO_ACTIVE_STORE,
     ERROR_NOTIFICATION_IMAGE_UNAVAILABLE,
+    ERROR_NOTIFICATIONS_NOT_AVAILABLE,
     ERROR_NOT_LINKED,
     ERROR_PERMISSION_DENIED,
     ERROR_RESULT_NOT_FOUND,
+    ERROR_STORE_NOT_AVAILABLE,
     ERROR_STORE_INACTIVE,
     ERROR_UNAVAILABLE,
     CreateInviteResult,
@@ -71,10 +89,16 @@ from app.oms import (
     LatestResultReadResult,
     LatestResultSummary,
     NotificationImageResult,
+    NotificationSettingsStoreSummary,
+    NotificationSettingsStoresResult,
     RedeemInviteResult,
     RevokeMembershipResult,
     SetActiveDeviceResult,
     SetActiveStoreResult,
+    StoreNotificationCapabilities,
+    StoreNotificationPreferences,
+    StoreNotificationSettings,
+    StoreNotificationSettingsResult,
     StoreDevicesResult,
     StoreSummary,
     StoresResult,
@@ -123,6 +147,9 @@ class FakeOmsClient:
         command_status_results: list[object] | None = None,
         command_photo_results: list[object] | None = None,
         notification_image_results: list[object] | None = None,
+        notification_settings_stores_results: list[NotificationSettingsStoresResult] | None = None,
+        store_notification_settings_results: list[StoreNotificationSettingsResult] | None = None,
+        update_store_notification_settings_results: list[StoreNotificationSettingsResult] | None = None,
     ) -> None:
         self.calls: list[tuple[str, object | None]] = []
         self._ensure_results = ensure_results or [EnsureSessionResult(ok=True, degraded=False, is_banned=False)]
@@ -140,6 +167,15 @@ class FakeOmsClient:
         self._command_status_results = command_status_results or []
         self._command_photo_results = command_photo_results or []
         self._notification_image_results = notification_image_results or []
+        self._notification_settings_stores_results = (
+            notification_settings_stores_results or [NotificationSettingsStoresResult(ok=True)]
+        )
+        self._store_notification_settings_results = (
+            store_notification_settings_results or [StoreNotificationSettingsResult(ok=True)]
+        )
+        self._update_store_notification_settings_results = (
+            update_store_notification_settings_results or [StoreNotificationSettingsResult(ok=True)]
+        )
 
     def _next(self, queue: list[object]) -> object:
         if not queue:
@@ -207,6 +243,37 @@ class FakeOmsClient:
     async def fetch_notification_result_image(self, from_user, chat, *, result_id: str):
         self.calls.append(("fetch_notification_result_image", result_id))
         return self._next(self._notification_image_results)
+
+    async def get_notification_settings_stores(self, from_user, chat) -> NotificationSettingsStoresResult:
+        self.calls.append(("get_notification_settings_stores", None))
+        return self._next(self._notification_settings_stores_results)
+
+    async def get_store_notification_settings(self, from_user, chat, *, store_id: str) -> StoreNotificationSettingsResult:
+        self.calls.append(("get_store_notification_settings", store_id))
+        return self._next(self._store_notification_settings_results)
+
+    async def update_store_notification_settings(
+        self,
+        from_user,
+        chat,
+        *,
+        store_id: str,
+        notifications_enabled: bool | None = None,
+        device_status_enabled: bool | None = None,
+        defect_detected_enabled: bool | None = None,
+    ) -> StoreNotificationSettingsResult:
+        self.calls.append(
+            (
+                "update_store_notification_settings",
+                {
+                    "store_id": store_id,
+                    "notifications_enabled": notifications_enabled,
+                    "device_status_enabled": device_status_enabled,
+                    "defect_detected_enabled": defect_detected_enabled,
+                },
+            )
+        )
+        return self._next(self._update_store_notification_settings_results)
 
 
 def _write_catalog(path: str, payload: dict[str, object]) -> None:
@@ -281,6 +348,18 @@ def _catalog_payload() -> dict[str, object]:
         "notifications.image.unavailable": "IMAGE UNAVAILABLE",
         "notifications.image.denied": "IMAGE DENIED",
         "notifications.image.failed": "IMAGE FAILED",
+        "settings.title": "SETTINGS",
+        "settings.notifications.title": "NOTIFICATION SETTINGS",
+        "settings.notifications.choose_store": "CHOOSE STORE",
+        "settings.notifications.no_stores": "NO STORES",
+        "settings.notifications.store_not_available": "STORE NOT AVAILABLE",
+        "settings.notifications.not_available": "NOTIFICATIONS NOT AVAILABLE",
+        "settings.notifications.option_not_available": "OPTION NOT AVAILABLE",
+        "settings.notifications.all": "ALL NOTIFICATIONS",
+        "settings.notifications.device_status": "DEVICE STATUS NOTIFICATIONS",
+        "settings.notifications.defect_detected": "DEFECT NOTIFICATIONS",
+        "settings.state.on": "ON",
+        "settings.state.off": "OFF",
         "tare.menu": "TARE MENU",
         "tare.confirm_unavailable": "TARE CONFIRM UNAVAILABLE",
         "tare.reset_unavailable": "TARE RESET UNAVAILABLE",
@@ -315,6 +394,7 @@ def _catalog_payload() -> dict[str, object]:
         "buttons.status": "STATUS",
         "buttons.last_detection": "LAST",
         "buttons.photo": "PHOTO",
+        "buttons.notification_settings": "NOTIFICATION SETTINGS BUTTON",
         "buttons.show_image": "SHOW IMAGE",
         "buttons.tare": "TARE",
         "buttons.back": "BACK",
@@ -330,6 +410,7 @@ def _catalog_payload() -> dict[str, object]:
             "last": "last",
             "invite": "invite",
             "unlink": "unlink",
+            "settings": "settings",
         },
     }
 
@@ -347,7 +428,7 @@ def test_start_handler_replies_with_unlinked_state(tmp_path, monkeypatch) -> Non
     message = DummyMessage()
     asyncio.run(start_handler(message, session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False)))
 
-    message.answer.assert_awaited_once_with("START UNLINKED")
+    message.answer.assert_awaited_once_with("START UNLINKED", parse_mode="Markdown")
 
 
 def test_start_handler_replies_when_oms_unavailable(tmp_path, monkeypatch) -> None:
@@ -356,7 +437,7 @@ def test_start_handler_replies_when_oms_unavailable(tmp_path, monkeypatch) -> No
     message = DummyMessage()
     asyncio.run(start_handler(message, session_state=EnsureSessionResult(ok=False, degraded=True, is_banned=False)))
 
-    message.answer.assert_awaited_once_with("OMS DOWN")
+    message.answer.assert_awaited_once_with("OMS DOWN", parse_mode="Markdown")
 
 
 def test_start_handler_replies_when_user_banned(tmp_path, monkeypatch) -> None:
@@ -365,7 +446,7 @@ def test_start_handler_replies_when_user_banned(tmp_path, monkeypatch) -> None:
     message = DummyMessage()
     asyncio.run(start_handler(message, session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=True)))
 
-    message.answer.assert_awaited_once_with("BANNED")
+    message.answer.assert_awaited_once_with("BANNED", parse_mode="Markdown")
 
 
 def test_help_handler_replies_from_catalog(tmp_path, monkeypatch) -> None:
@@ -374,7 +455,7 @@ def test_help_handler_replies_from_catalog(tmp_path, monkeypatch) -> None:
     message = DummyMessage()
     asyncio.run(help_handler(message))
 
-    message.answer.assert_awaited_once_with("HELP")
+    message.answer.assert_awaited_once_with("HELP", parse_mode="Markdown")
 
 
 def test_ping_handler_replies_from_catalog(tmp_path, monkeypatch) -> None:
@@ -383,7 +464,7 @@ def test_ping_handler_replies_from_catalog(tmp_path, monkeypatch) -> None:
     message = DummyMessage()
     asyncio.run(ping_handler(message))
 
-    message.answer.assert_awaited_once_with("PONG")
+    message.answer.assert_awaited_once_with("PONG", parse_mode="Markdown")
 
 
 def test_link_handler_happy_path(tmp_path, monkeypatch) -> None:
@@ -413,7 +494,7 @@ def test_link_handler_happy_path(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("LINK OK Shop 1\n\nSTART SINGLE Shop 1")
+    message.answer.assert_awaited_once_with("LINK OK Shop 1\n\nSTART SINGLE Shop 1", parse_mode="Markdown")
     assert oms_client.calls == [("redeem_invite", "123456"), ("ensure_session", None)]
 
 
@@ -444,7 +525,7 @@ def test_link_handler_already_linked_path(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("LINK ALREADY\n\nSTART SINGLE Shop 1")
+    message.answer.assert_awaited_once_with("LINK ALREADY\n\nSTART SINGLE Shop 1", parse_mode="Markdown")
 
 
 def test_link_handler_invalid_format(tmp_path, monkeypatch) -> None:
@@ -462,7 +543,7 @@ def test_link_handler_invalid_format(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("LINK INVALID FORMAT")
+    message.answer.assert_awaited_once_with("LINK INVALID FORMAT", parse_mode="Markdown")
     assert oms_client.calls == []
 
 
@@ -483,7 +564,7 @@ def test_link_handler_store_inactive_error(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("LINK STORE INACTIVE")
+    message.answer.assert_awaited_once_with("LINK STORE INACTIVE", parse_mode="Markdown")
 
 
 def test_invite_handler_success_path(tmp_path, monkeypatch) -> None:
@@ -514,7 +595,7 @@ def test_invite_handler_success_path(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("INVITE OK Shop 1 654321")
+    message.answer.assert_awaited_once_with("INVITE OK Shop 1 654321", parse_mode="Markdown")
     assert oms_client.calls == [("create_invite", "operator")]
 
 
@@ -546,7 +627,7 @@ def test_invite_handler_formats_expiry_timestamp(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("INVITE OK EXP Shop 1 654321 07.03.2026, 17:05")
+    message.answer.assert_awaited_once_with("INVITE OK EXP Shop 1 654321 07.03.2026, 17:05", parse_mode="Markdown")
 
 
 def test_invite_handler_permission_denied(tmp_path, monkeypatch) -> None:
@@ -565,7 +646,7 @@ def test_invite_handler_permission_denied(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("INVITE DENIED")
+    message.answer.assert_awaited_once_with("INVITE DENIED", parse_mode="Markdown")
 
 
 def test_invite_handler_store_inactive(tmp_path, monkeypatch) -> None:
@@ -584,7 +665,7 @@ def test_invite_handler_store_inactive(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("INVITE STORE INACTIVE")
+    message.answer.assert_awaited_once_with("INVITE STORE INACTIVE", parse_mode="Markdown")
 
 
 def test_unlink_handler_one_store_confirmation_flow(tmp_path, monkeypatch) -> None:
@@ -725,7 +806,7 @@ def test_store_switch_not_linked_error(tmp_path, monkeypatch) -> None:
         )
     )
 
-    callback_query.message.edit_text.assert_awaited_once_with("NOT LINKED")
+    callback_query.message.edit_text.assert_awaited_once_with("NOT LINKED", parse_mode="Markdown")
     callback_query.answer.assert_awaited_once_with()
 
 
@@ -769,7 +850,7 @@ def test_unlink_cancel_callback_edits_message(tmp_path, monkeypatch) -> None:
         )
     )
 
-    callback_query.message.edit_text.assert_awaited_once_with("UNLINK CANCEL")
+    callback_query.message.edit_text.assert_awaited_once_with("UNLINK CANCEL", parse_mode="Markdown")
     callback_query.answer.assert_awaited_once_with()
 
 
@@ -787,7 +868,7 @@ def test_oms_unavailable_handling(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("OMS DOWN")
+    message.answer.assert_awaited_once_with("OMS DOWN", parse_mode="Markdown")
 
 
 def _device_status_result(
@@ -840,6 +921,33 @@ def _latest_result(
             weight_grams=weight_grams,
             fruits=fruits,
             defect=defect or LatestDefectSummary(),
+        ),
+    )
+
+
+def _store_notification_settings(
+    *,
+    store_id: str = "s1",
+    store_name: str = "Shop 1",
+    notifications_enabled: bool = True,
+    device_status_enabled: bool = True,
+    defect_detected_enabled: bool = False,
+    can_access_notifications: bool = True,
+    can_subscribe_device_status: bool = True,
+    can_subscribe_defect_detected: bool = True,
+) -> StoreNotificationSettings:
+    return StoreNotificationSettings(
+        store_id=store_id,
+        store_name=store_name,
+        preferences=StoreNotificationPreferences(
+            notifications_enabled=notifications_enabled,
+            device_status_enabled=device_status_enabled,
+            defect_detected_enabled=defect_detected_enabled,
+        ),
+        capabilities=StoreNotificationCapabilities(
+            can_access_notifications=can_access_notifications,
+            can_subscribe_device_status=can_subscribe_device_status,
+            can_subscribe_defect_detected=can_subscribe_defect_detected,
         ),
     )
 
@@ -899,7 +1007,7 @@ def test_devices_handler_requires_active_store(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("NO ACTIVE STORE")
+    message.answer.assert_awaited_once_with("NO ACTIVE STORE", parse_mode="Markdown")
     assert oms_client.calls == []
 
 
@@ -985,7 +1093,8 @@ def test_last_handler_formats_store_wide_latest_result(tmp_path, monkeypatch) ->
         "WEIGHT: 222 g\n"
         "IMAGE: image-1\n"
         "DEFECT: YES (defect)\n"
-        "FRUITS: apple (111 g)"
+        "FRUITS: apple (111 g)",
+        parse_mode="Markdown",
     )
     assert oms_client.calls == [("get_latest_result", None)]
 
@@ -1111,7 +1220,8 @@ def test_last_handler_renders_fruit_without_weight(tmp_path, monkeypatch) -> Non
         "WEIGHT: 222 g\n"
         "IMAGE: image-1\n"
         "DEFECT: NO\n"
-        "FRUITS: apple"
+        "FRUITS: apple",
+        parse_mode="Markdown",
     )
 
 
@@ -1144,7 +1254,8 @@ def test_last_handler_formats_missing_defect_as_no(tmp_path, monkeypatch) -> Non
         "WEIGHT: 222 g\n"
         "IMAGE: image-1\n"
         "DEFECT: NO\n"
-        "FRUITS: apple (111 g)"
+        "FRUITS: apple (111 g)",
+        parse_mode="Markdown",
     )
 
 
@@ -1279,7 +1390,7 @@ def test_last_handler_result_not_found_maps_to_catalog_message(tmp_path, monkeyp
         )
     )
 
-    message.answer.assert_awaited_once_with("STORE LAST EMPTY Shop 1")
+    message.answer.assert_awaited_once_with("STORE LAST EMPTY Shop 1", parse_mode="Markdown")
 
 
 def test_device_status_callback_handles_device_not_in_active_store(tmp_path, monkeypatch) -> None:
@@ -1306,7 +1417,7 @@ def test_device_status_callback_handles_device_not_in_active_store(tmp_path, mon
         )
     )
 
-    callback_query.message.edit_text.assert_awaited_once_with("DEVICE NOT IN STORE")
+    callback_query.message.edit_text.assert_awaited_once_with("DEVICE NOT IN STORE", parse_mode="Markdown")
     callback_query.answer.assert_awaited_once_with()
 
 
@@ -1506,7 +1617,7 @@ def test_last_handler_no_active_store_message(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with("NO ACTIVE STORE")
+    message.answer.assert_awaited_once_with("NO ACTIVE STORE", parse_mode="Markdown")
     assert oms_client.calls == []
 
 
@@ -1575,4 +1686,470 @@ def test_notification_image_callback_invalid_payload_is_safe(tmp_path, monkeypat
 
     callback_query.message.answer_photo.assert_not_awaited()
     callback_query.answer.assert_awaited_once_with("IMAGE FAILED", show_alert=True)
+    assert oms_client.calls == []
+
+
+def test_settings_handler_shows_notification_settings_button(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    message = DummyMessage(text="/settings")
+
+    asyncio.run(
+        settings_handler(
+            message,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+        )
+    )
+
+    assert message.answer.await_args.args[0] == "SETTINGS"
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert callback_data == [build_settings_notifications_open_callback()]
+
+
+def test_notification_settings_entry_empty_store_list_message(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_open_callback())
+    oms_client = FakeOmsClient(
+        notification_settings_stores_results=[NotificationSettingsStoresResult(ok=True, stores=())]
+    )
+
+    asyncio.run(
+        settings_notifications_open_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    callback_query.message.edit_text.assert_awaited_once_with("NO STORES", parse_mode="Markdown")
+    callback_query.answer.assert_awaited_once_with()
+    assert oms_client.calls == [("get_notification_settings_stores", None)]
+
+
+def test_notification_settings_entry_renders_store_picker_callbacks(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_open_callback())
+    oms_client = FakeOmsClient(
+        notification_settings_stores_results=[
+            NotificationSettingsStoresResult(
+                ok=True,
+                stores=(
+                    NotificationSettingsStoreSummary(store_id="s1", store_name="Shop 1"),
+                    NotificationSettingsStoreSummary(store_id="s2", store_name="Shop 2"),
+                ),
+            )
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_open_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    assert callback_query.message.edit_text.await_args.args[0] == "CHOOSE STORE"
+    markup = callback_query.message.edit_text.await_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert callback_data == [
+        build_settings_notifications_store_callback("s1"),
+        build_settings_notifications_store_callback("s2"),
+        build_settings_notifications_back_to_settings_callback(),
+    ]
+    callback_query.answer.assert_awaited_once_with()
+
+
+def test_notification_settings_store_selection_renders_store_view(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_store_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    store_id="s1",
+                    store_name="Shop 1",
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=False,
+                ),
+            )
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_store_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    text = callback_query.message.edit_text.await_args.args[0]
+    assert "NOTIFICATION SETTINGS" in text
+    assert "STORE: Shop 1" in text
+    assert "ALL NOTIFICATIONS: ON" in text
+    assert "DEVICE STATUS NOTIFICATIONS: ON" in text
+    assert "DEFECT NOTIFICATIONS: OFF" in text
+    callback_query.answer.assert_awaited_once_with()
+    assert oms_client.calls == [("get_store_notification_settings", "s1")]
+
+
+def test_notification_settings_master_on_shows_subtype_buttons(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_store_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=False,
+                ),
+            )
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_store_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    markup = callback_query.message.edit_text.await_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert build_settings_notifications_toggle_master_callback("s1") in callback_data
+    assert build_settings_notifications_toggle_device_status_callback("s1") in callback_data
+    assert build_settings_notifications_toggle_defect_callback("s1") in callback_data
+
+
+def test_notification_settings_master_off_hides_subtype_rows_and_buttons(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_store_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=False,
+                    device_status_enabled=True,
+                    defect_detected_enabled=True,
+                ),
+            )
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_store_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    text = callback_query.message.edit_text.await_args.args[0]
+    assert "ALL NOTIFICATIONS: OFF" in text
+    assert "DEVICE STATUS NOTIFICATIONS" not in text
+    assert "DEFECT NOTIFICATIONS" not in text
+    markup = callback_query.message.edit_text.await_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert callback_data == [
+        build_settings_notifications_toggle_master_callback("s1"),
+        build_settings_notifications_back_to_picker_callback(),
+    ]
+
+
+def test_notification_settings_toggle_master_updates_and_rerenders(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_toggle_master_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=True,
+                ),
+            )
+        ],
+        update_store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=False,
+                    device_status_enabled=True,
+                    defect_detected_enabled=True,
+                ),
+            )
+        ],
+    )
+
+    asyncio.run(
+        settings_notifications_toggle_master_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    assert oms_client.calls[0] == ("get_store_notification_settings", "s1")
+    assert oms_client.calls[1] == (
+        "update_store_notification_settings",
+        {
+            "store_id": "s1",
+            "notifications_enabled": False,
+            "device_status_enabled": None,
+            "defect_detected_enabled": None,
+        },
+    )
+    text = callback_query.message.edit_text.await_args.args[0]
+    assert "ALL NOTIFICATIONS: OFF" in text
+    assert "DEVICE STATUS NOTIFICATIONS" not in text
+
+
+def test_notification_settings_toggle_device_status_updates_and_rerenders(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_toggle_device_status_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=False,
+                ),
+            )
+        ],
+        update_store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=False,
+                    defect_detected_enabled=False,
+                ),
+            )
+        ],
+    )
+
+    asyncio.run(
+        settings_notifications_toggle_device_status_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    assert oms_client.calls[1] == (
+        "update_store_notification_settings",
+        {
+            "store_id": "s1",
+            "notifications_enabled": None,
+            "device_status_enabled": False,
+            "defect_detected_enabled": None,
+        },
+    )
+    text = callback_query.message.edit_text.await_args.args[0]
+    assert "DEVICE STATUS NOTIFICATIONS: OFF" in text
+
+
+def test_notification_settings_toggle_defect_updates_and_rerenders(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_toggle_defect_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=False,
+                ),
+            )
+        ],
+        update_store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=True,
+                ),
+            )
+        ],
+    )
+
+    asyncio.run(
+        settings_notifications_toggle_defect_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    assert oms_client.calls[1] == (
+        "update_store_notification_settings",
+        {
+            "store_id": "s1",
+            "notifications_enabled": None,
+            "device_status_enabled": None,
+            "defect_detected_enabled": True,
+        },
+    )
+    text = callback_query.message.edit_text.await_args.args[0]
+    assert "DEFECT NOTIFICATIONS: ON" in text
+
+
+def test_notification_settings_store_not_available_error(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_store_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(ok=False, error_code=ERROR_STORE_NOT_AVAILABLE)
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_store_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    callback_query.message.edit_text.assert_awaited_once_with("STORE NOT AVAILABLE", parse_mode="Markdown")
+    callback_query.answer.assert_awaited_once_with()
+
+
+def test_notification_settings_notifications_not_available_error(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_store_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(ok=False, error_code=ERROR_NOTIFICATIONS_NOT_AVAILABLE)
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_store_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    callback_query.message.edit_text.assert_awaited_once_with("NOTIFICATIONS NOT AVAILABLE", parse_mode="Markdown")
+    callback_query.answer.assert_awaited_once_with()
+
+
+def test_notification_settings_option_not_available_error(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_toggle_device_status_callback("s1"))
+    oms_client = FakeOmsClient(
+        store_notification_settings_results=[
+            StoreNotificationSettingsResult(
+                ok=True,
+                settings=_store_notification_settings(
+                    notifications_enabled=True,
+                    device_status_enabled=True,
+                    defect_detected_enabled=False,
+                ),
+            )
+        ],
+        update_store_notification_settings_results=[
+            StoreNotificationSettingsResult(ok=False, error_code=ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE)
+        ],
+    )
+
+    asyncio.run(
+        settings_notifications_toggle_device_status_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    callback_query.message.edit_text.assert_awaited_once_with("OPTION NOT AVAILABLE", parse_mode="Markdown")
+    callback_query.answer.assert_awaited_once_with()
+
+
+def test_notification_settings_back_to_settings_renders_settings_menu(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_back_to_settings_callback())
+
+    asyncio.run(
+        settings_notifications_back_to_settings_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+        )
+    )
+
+    assert callback_query.message.edit_text.await_args.args[0] == "SETTINGS"
+    markup = callback_query.message.edit_text.await_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert callback_data == [build_settings_notifications_open_callback()]
+    callback_query.answer.assert_awaited_once_with()
+
+
+def test_notification_settings_back_to_picker_refreshes_store_list(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data=build_settings_notifications_back_to_picker_callback())
+    oms_client = FakeOmsClient(
+        notification_settings_stores_results=[
+            NotificationSettingsStoresResult(
+                ok=True,
+                stores=(NotificationSettingsStoreSummary(store_id="s1", store_name="Shop 1"),),
+            )
+        ]
+    )
+
+    asyncio.run(
+        settings_notifications_back_to_picker_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    assert callback_query.message.edit_text.await_args.args[0] == "CHOOSE STORE"
+    callback_query.answer.assert_awaited_once_with()
+    assert oms_client.calls == [("get_notification_settings_stores", None)]
+
+
+def test_notification_settings_invalid_or_stale_callback_is_safe(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    callback_query = DummyCallbackQuery(data="settings:notifications:store:")
+    oms_client = FakeOmsClient()
+
+    asyncio.run(
+        settings_notifications_store_callback_handler(
+            callback_query,
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    callback_query.message.edit_text.assert_not_awaited()
+    callback_query.answer.assert_awaited_once_with("GENERIC", show_alert=True)
     assert oms_client.calls == []
