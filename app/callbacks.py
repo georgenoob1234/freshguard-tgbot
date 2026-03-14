@@ -14,13 +14,25 @@ DEVICE_TARE_RESET_PREFIX = "device:tare:reset:"
 DEVICE_TARE_CANCEL_PREFIX = "device:tare:cancel:"
 DEVICE_BACK = "device:back"
 NOTIFICATION_IMAGE_PREFIX = "notification:image:"
-SETTINGS_NOTIFICATIONS_OPEN = "settings:notifications"
-SETTINGS_NOTIFICATIONS_STORE_PREFIX = "settings:notifications:store:"
-SETTINGS_NOTIFICATIONS_TOGGLE_MASTER_PREFIX = "settings:notifications:toggle:master:"
-SETTINGS_NOTIFICATIONS_TOGGLE_DEVICE_STATUS_PREFIX = "settings:notifications:toggle:device_status:"
-SETTINGS_NOTIFICATIONS_TOGGLE_DEFECT_PREFIX = "settings:notifications:toggle:defect:"
-SETTINGS_NOTIFICATIONS_BACK_TO_SETTINGS = "settings:notifications:back:settings"
-SETTINGS_NOTIFICATIONS_BACK_TO_PICKER = "settings:notifications:back:picker"
+
+# Telegram enforces a hard 64-byte limit on callback_data.
+# Store IDs look like "st_ab0c4d3281984770b99e299be3960e5e" (35 chars), so every
+# settings prefix that carries a store_id must stay ≤ 29 chars to fit in 64 bytes.
+# Readable long names → short wire tokens:
+#   s:n       = settings : notifications
+#   s:n:st:   = settings : notifications : store        (open store settings view)
+#   s:n:tm:   = settings : notifications : toggle master
+#   s:n:td:   = settings : notifications : toggle device_status
+#   s:n:tf:   = settings : notifications : toggle defect
+#   s:n:bs    = settings : notifications : back  → settings menu
+#   s:n:bp    = settings : notifications : back  → store picker
+SETTINGS_NOTIFICATIONS_OPEN = "s:n"                           # 3 bytes
+SETTINGS_NOTIFICATIONS_STORE_PREFIX = "s:n:st:"               # 7 bytes  + 35 store_id = 42
+SETTINGS_NOTIFICATIONS_TOGGLE_MASTER_PREFIX = "s:n:tm:"       # 7 bytes  + 35 store_id = 42
+SETTINGS_NOTIFICATIONS_TOGGLE_DEVICE_STATUS_PREFIX = "s:n:td:"  # 7 bytes  + 35 store_id = 42
+SETTINGS_NOTIFICATIONS_TOGGLE_DEFECT_PREFIX = "s:n:tf:"       # 7 bytes  + 35 store_id = 42
+SETTINGS_NOTIFICATIONS_BACK_TO_SETTINGS = "s:n:bs"            # 6 bytes  (no store_id)
+SETTINGS_NOTIFICATIONS_BACK_TO_PICKER = "s:n:bp"              # 6 bytes  (no store_id)
 
 
 def build_store_switch_callback(store_id: str) -> str:
