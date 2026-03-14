@@ -26,6 +26,9 @@ ERROR_COMMAND_CONNECTOR_OFFLINE = "connector_offline"
 ERROR_COMMAND_PHOTO_NOT_READY = "photo_not_ready"
 ERROR_COMMAND_PHOTO_NOT_FOUND = "photo_not_found"
 ERROR_COMMAND_HAS_NO_PHOTO = "command_has_no_photo"
+ERROR_NOTIFICATION_IMAGE_UNAVAILABLE = "notification_image_unavailable"
+ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED = "notification_image_access_denied"
+ERROR_NOTIFICATION_IMAGE_FAILED = "notification_image_failed"
 ERROR_RESULT_NOT_FOUND = "result_not_found"
 ERROR_REVOKED = "revoked"
 ERROR_STORE_INACTIVE = "store_inactive"
@@ -229,6 +232,14 @@ class DeviceCommandStatusResult:
 
 @dataclass(frozen=True)
 class CommandPhotoResult:
+    ok: bool
+    content_type: str | None = None
+    payload: bytes | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class NotificationImageResult:
     ok: bool
     content_type: str | None = None
     payload: bytes | None = None
@@ -874,6 +885,16 @@ class OmsClient:
             return ERROR_RESULT_NOT_FOUND
         return self._map_active_device_error(status, payload)
 
+    def _map_notification_image_error(self, status: int, payload: Any) -> str:
+        tokens = set(_extract_error_tokens(payload))
+        if status == 403 or {"image_access_denied", "permission_denied", "forbidden"} & tokens:
+            return ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED
+        if status == 404 or {"result_not_found", "image_not_found"} & tokens:
+            return ERROR_NOTIFICATION_IMAGE_UNAVAILABLE
+        if status == 400 or {"invalid_result_id", "bad_request"} & tokens:
+            return ERROR_NOTIFICATION_IMAGE_UNAVAILABLE
+        return ERROR_NOTIFICATION_IMAGE_FAILED
+
     async def ensure_session(self, from_user: User | None, chat: Chat | None) -> EnsureSessionResult:
         payload = self._build_session_payload(from_user, chat)
         if payload is None:
@@ -1288,6 +1309,43 @@ class OmsClient:
                 error_code=_map_command_error(status, error_payload),
             )
         return CommandPhotoResult(ok=True, payload=payload_bytes, content_type=content_type)
+
+    async def fetch_notification_result_image(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        result_id: str,
+    ) -> NotificationImageResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return NotificationImageResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        raw_response = await self._request_bytes(
+            "GET",
+            f"/notifications/results/{result_id}/image",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            params=payload,
+        )
+        if raw_response is None:
+            return NotificationImageResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        status, payload_bytes, content_type = raw_response
+        if status >= 500:
+            return NotificationImageResult(ok=False, error_code=ERROR_UNAVAILABLE)
+        if status >= 400:
+            error_payload: Any = None
+            try:
+                if payload_bytes:
+                    error_payload = json.loads(payload_bytes.decode("utf-8"))
+            except Exception:
+                error_payload = None
+            return NotificationImageResult(
+                ok=False,
+                error_code=self._map_notification_image_error(status, error_payload),
+            )
+        return NotificationImageResult(ok=True, payload=payload_bytes, content_type=content_type)
 
     async def revoke_self_membership(
         self,

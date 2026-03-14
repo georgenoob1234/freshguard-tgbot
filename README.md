@@ -1,4 +1,4 @@
-# tgbot (Milestone 3)
+# tgbot
 
 Telegram adapter microservice based on `aiogram` with:
 - DM-only behavior (group, supergroup, and channel updates are ignored)
@@ -6,6 +6,8 @@ Telegram adapter microservice based on `aiogram` with:
 - Telegram command menu configured from `config/messages.ru.json`
 - `/start`, `/help`, `/ping`, `/link`, `/stores`, `/devices`, `/last`, `/invite`, `/unlink`
 - inline callback flows for store switching, device selection, selected-device actions, tare submenu, and unlink confirmation
+- internal notifications endpoint for OMS push batches: `POST /internal/notifications/push`
+- defect notifications with `Show image` callback that fetches image bytes from OMS and sends a new Telegram photo message
 - environment-driven config
 - JSON message catalogs for user-facing texts and command descriptions
 
@@ -22,6 +24,10 @@ Environment variables:
 - `HTTP_TIMEOUT_SECONDS` (optional, default `5`)
 - `MESSAGES_PATH` (optional, default `config/messages.ru.json`)
 - `LOG_LEVEL` (optional, default `INFO`)
+- `INTERNAL_API_HOST` (optional, default `0.0.0.0`)
+- `INTERNAL_API_PORT` (optional, default `8081`)
+- `INTERNAL_NOTIFICATIONS_PUSH_PATH` (optional, default `/internal/notifications/push`)
+- `INTERNAL_NOTIFICATIONS_AUTH_TOKEN` (optional, default empty/disabled)
 
 ## Run locally
 
@@ -54,9 +60,22 @@ Bot command menu entries are loaded from `bot_commands` in `config/messages.ru.j
 - `/devices` lists devices for the active store and lets the user select an active device.
 - selected-device callbacks expose `Status`, `Last detection`, `Photo`, `Tare`, and `Back`.
 - `/last` shows the latest detection across any device in the active store.
-- `Photo` and `Tare` currently keep the Milestone 3 UX but answer with placeholder messages because OMS does not expose bot-side execution endpoints for those actions yet.
+- `Photo` and `Tare` callbacks submit OMS commands and render follow-up results.
 - `/invite` creates an invite for the current active store.
 - `/unlink` asks for explicit confirmation before revoking the selected store membership.
+
+## Internal Notifications (Milestone 6)
+
+- OMS pushes batches to `POST /internal/notifications/push`.
+- The bot accepts mixed `device_offline`, `device_online`, and `defect_detected` deliveries in one batch.
+- Each delivery is processed independently and returned in the OMS format:
+  - `status: sent` on success
+  - `status: failed` with normalized `failure_reason` (`telegram_forbidden`, `telegram_chat_not_found`, `telegram_bad_request`, `transport_timeout`, `transport_error`, `internal_error`)
+- `defect_detected` may include a `Show image` button (when `can_show_image=true`).
+- On `Show image` callback, tgbot calls `GET /bot/v1/notifications/results/{result_id}/image` and sends the image as a new Telegram message.
+- Optional internal endpoint auth:
+  - set `INTERNAL_NOTIFICATIONS_AUTH_TOKEN`
+  - send either `Authorization: Bearer <token>` or `X-Internal-Token: <token>`
 
 ## OMS contract notes
 

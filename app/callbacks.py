@@ -13,6 +13,7 @@ DEVICE_TARE_CONFIRM_PREFIX = "device:tare:confirm:"
 DEVICE_TARE_RESET_PREFIX = "device:tare:reset:"
 DEVICE_TARE_CANCEL_PREFIX = "device:tare:cancel:"
 DEVICE_BACK = "device:back"
+NOTIFICATION_IMAGE_PREFIX = "notification:image:"
 
 
 def build_store_switch_callback(store_id: str) -> str:
@@ -63,6 +64,10 @@ def build_device_back_callback() -> str:
     return DEVICE_BACK
 
 
+def build_notification_image_callback(result_id: str) -> str:
+    return f"{NOTIFICATION_IMAGE_PREFIX}{result_id}"
+
+
 def parse_store_switch_callback(data: str | None) -> str | None:
     return _parse_prefixed_data(data, STORE_SWITCH_PREFIX)
 
@@ -105,6 +110,10 @@ def parse_device_tare_reset_callback(data: str | None) -> str | None:
 
 def parse_device_tare_cancel_callback(data: str | None) -> str | None:
     return _parse_prefixed_data(data, DEVICE_TARE_CANCEL_PREFIX)
+
+
+def parse_notification_image_callback(data: str | None) -> str | None:
+    return _parse_prefixed_data(data, NOTIFICATION_IMAGE_PREFIX)
 
 
 def _parse_prefixed_data(data: str | None, prefix: str) -> str | None:

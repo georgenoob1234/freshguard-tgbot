@@ -8,6 +8,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from app.callbacks import (
     build_device_back_callback,
     build_device_last_callback,
+    build_notification_image_callback,
     build_device_photo_callback,
     build_device_select_callback,
     build_device_status_callback,
@@ -115,4 +116,11 @@ def build_device_tare_keyboard(
         builder.adjust(1, 1)
     else:
         builder.adjust(1)
+    return builder.as_markup()
+
+
+def build_notification_image_keyboard(result_id: str) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text=msg("buttons.show_image"), callback_data=build_notification_image_callback(result_id))
+    builder.adjust(1)
     return builder.as_markup()

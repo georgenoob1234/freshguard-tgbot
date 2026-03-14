@@ -13,6 +13,10 @@ class Settings:
     oms_base_url: str
     oms_bot_token: str
     http_timeout_seconds: float
+    internal_api_host: str
+    internal_api_port: int
+    internal_notifications_push_path: str
+    internal_notifications_auth_token: str
 
 
 def load_settings() -> Settings:
@@ -42,6 +46,25 @@ def load_settings() -> Settings:
     if http_timeout_seconds <= 0:
         raise ValueError("HTTP_TIMEOUT_SECONDS must be a positive number")
 
+    internal_api_host = os.getenv("INTERNAL_API_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
+    raw_internal_api_port = os.getenv("INTERNAL_API_PORT", "8081").strip()
+    try:
+        internal_api_port = int(raw_internal_api_port)
+    except ValueError as exc:
+        raise ValueError("INTERNAL_API_PORT must be an integer between 1 and 65535") from exc
+    if internal_api_port <= 0 or internal_api_port > 65535:
+        raise ValueError("INTERNAL_API_PORT must be an integer between 1 and 65535")
+
+    internal_notifications_push_path = (
+        os.getenv("INTERNAL_NOTIFICATIONS_PUSH_PATH", "/internal/notifications/push").strip()
+        or "/internal/notifications/push"
+    )
+    if not internal_notifications_push_path.startswith("/"):
+        internal_notifications_push_path = f"/{internal_notifications_push_path}"
+
+    internal_notifications_auth_token = os.getenv("INTERNAL_NOTIFICATIONS_AUTH_TOKEN", "").strip()
+
     return Settings(
         telegram_bot_token=token,
         messages_path=messages_path,
@@ -49,4 +72,8 @@ def load_settings() -> Settings:
         oms_base_url=oms_base_url,
         oms_bot_token=oms_bot_token,
         http_timeout_seconds=http_timeout_seconds,
+        internal_api_host=internal_api_host,
+        internal_api_port=internal_api_port,
+        internal_notifications_push_path=internal_notifications_push_path,
+        internal_notifications_auth_token=internal_notifications_auth_token,
     )

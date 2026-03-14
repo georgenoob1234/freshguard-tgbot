@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from app.callbacks import (
     DEVICE_BACK,
     DEVICE_LAST_PREFIX,
+    NOTIFICATION_IMAGE_PREFIX,
     DEVICE_PHOTO_PREFIX,
     DEVICE_SELECT_PREFIX,
     DEVICE_STATUS_PREFIX,
@@ -36,11 +37,13 @@ from app.callbacks import (
     parse_device_tare_confirm_callback,
     parse_device_tare_menu_callback,
     parse_device_tare_reset_callback,
+    parse_notification_image_callback,
     parse_store_switch_callback,
     parse_unlink_confirm_callback,
     parse_unlink_pick_callback,
 )
 from app.config import load_settings
+from app.internal_notifications import InternalNotificationsServer
 from app.keyboards import (
     build_device_list_keyboard,
     build_device_tare_keyboard,
@@ -65,6 +68,9 @@ from app.oms import (
     ERROR_COMMAND_PHOTO_NOT_FOUND,
     ERROR_COMMAND_PHOTO_NOT_READY,
     ERROR_COMMAND_UNSUPPORTED,
+    ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED,
+    ERROR_NOTIFICATION_IMAGE_FAILED,
+    ERROR_NOTIFICATION_IMAGE_UNAVAILABLE,
     ERROR_RESULT_NOT_FOUND,
     ERROR_REVOKED,
     ERROR_STORE_INACTIVE,
@@ -352,6 +358,16 @@ def _build_command_error_text(error_code: str | None) -> str:
     if error_code == ERROR_COMMAND_NOT_FOUND:
         return msg("commands.not_found")
     return msg("commands.failed")
+
+
+def _build_notification_image_error_text(error_code: str | None) -> str:
+    if error_code == ERROR_NOTIFICATION_IMAGE_UNAVAILABLE:
+        return msg("notifications.image.unavailable")
+    if error_code == ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED:
+        return msg("notifications.image.denied")
+    if error_code in {ERROR_NOTIFICATION_IMAGE_FAILED, ERROR_UNAVAILABLE}:
+        return msg("notifications.image.failed")
+    return msg("notifications.image.failed")
 
 
 def _device_actions_from_status(status: DeviceStatusSummary | None) -> DeviceActionVisibility | None:
@@ -1201,6 +1217,64 @@ async def device_photo_callback_handler(
         _finish_in_flight(callback_query.from_user.id, device_id, "photo")
 
 
+@router.callback_query(F.data.startswith(NOTIFICATION_IMAGE_PREFIX))
+async def notification_image_callback_handler(
+    callback_query: CallbackQuery,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
+    if await _reply_blocked_callback(callback_query, session_state):
+        return
+
+    oms_client = await _require_oms_client_for_callback(callback_query, oms_client)
+    if oms_client is None:
+        return
+
+    result_id = parse_notification_image_callback(callback_query.data)
+    if result_id is None:
+        await callback_query.answer(msg("notifications.image.failed"), show_alert=True)
+        return
+
+    provider_user_id = callback_query.from_user.id if callback_query.from_user else "unknown"
+    LOGGER.info(
+        "notification_image_callback_received result_id=%s provider_user_id=%s",
+        result_id,
+        provider_user_id,
+    )
+    LOGGER.info(
+        "notification_image_fetch_started result_id=%s provider_user_id=%s",
+        result_id,
+        provider_user_id,
+    )
+    image_result = await oms_client.fetch_notification_result_image(
+        callback_query.from_user,
+        _callback_chat(callback_query),
+        result_id=result_id,
+    )
+    if not image_result.ok or image_result.payload is None:
+        error_text = _build_notification_image_error_text(image_result.error_code)
+        LOGGER.warning(
+            "notification_image_fetch_failed result_id=%s provider_user_id=%s error_code=%s",
+            result_id,
+            provider_user_id,
+            image_result.error_code,
+        )
+        await callback_query.answer(error_text, show_alert=True)
+        return
+
+    if callback_query.message is not None:
+        await callback_query.message.answer_photo(
+            BufferedInputFile(image_result.payload, filename="notification-result.jpg"),
+            caption=msg("notifications.image.caption"),
+        )
+    LOGGER.info(
+        "notification_image_fetch_succeeded result_id=%s provider_user_id=%s",
+        result_id,
+        provider_user_id,
+    )
+    await callback_query.answer()
+
+
 @router.callback_query(F.data.startswith(DEVICE_TARE_MENU_PREFIX))
 async def device_tare_menu_callback_handler(
     callback_query: CallbackQuery,
@@ -1657,11 +1731,14 @@ async def run_bot() -> None:
     setup_logging(settings.log_level)
     LOGGER.info("Starting tgbot service")
     LOGGER.info(
-        "Config loaded: messages_path=%s, log_level=%s, oms_base_url=%s, http_timeout_seconds=%s",
+        "Config loaded: messages_path=%s, log_level=%s, oms_base_url=%s, http_timeout_seconds=%s, internal_api_host=%s, internal_api_port=%s, internal_notifications_path=%s",
         settings.messages_path,
         settings.log_level,
         settings.oms_base_url,
         settings.http_timeout_seconds,
+        settings.internal_api_host,
+        settings.internal_api_port,
+        settings.internal_notifications_push_path,
     )
 
     clear_catalog_cache()
@@ -1674,8 +1751,16 @@ async def run_bot() -> None:
         timeout_seconds=settings.http_timeout_seconds,
     )
     dispatcher = build_dispatcher(oms_client)
+    notifications_server = InternalNotificationsServer(
+        bot=bot,
+        host=settings.internal_api_host,
+        port=settings.internal_api_port,
+        push_path=settings.internal_notifications_push_path,
+        auth_token=settings.internal_notifications_auth_token or None,
+    )
 
     try:
+        await notifications_server.start()
         commands = get_bot_commands(settings.messages_path)
         if commands:
             await bot.set_my_commands(commands)
@@ -1685,6 +1770,7 @@ async def run_bot() -> None:
 
         await dispatcher.start_polling(bot)
     finally:
+        await notifications_server.stop()
         await oms_client.close()
         await bot.session.close()
 

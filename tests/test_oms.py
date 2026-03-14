@@ -8,6 +8,8 @@ from app.oms import (
     ERROR_DEVICE_NOT_IN_ACTIVE_STORE,
     ERROR_INVALID_CODE,
     ERROR_NO_ACTIVE_STORE,
+    ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED,
+    ERROR_NOTIFICATION_IMAGE_UNAVAILABLE,
     ERROR_NOT_LINKED,
     ERROR_PERMISSION_DENIED,
     ERROR_RESULT_NOT_FOUND,
@@ -15,15 +17,16 @@ from app.oms import (
     ERROR_STORE_HAS_NO_DEVICES,
     ERROR_COMMAND_PHOTO_NOT_READY,
     ERROR_COMMAND_UNSUPPORTED,
+    DeviceActionVisibility,
     OmsClient,
 )
 
 
 class FakeResponse:
-    def __init__(self, status: int, payload) -> None:
+    def __init__(self, status: int, payload, headers: dict[str, str] | None = None) -> None:
         self.status = status
         self._payload = payload
-        self.headers = {}
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
@@ -306,6 +309,12 @@ def test_get_device_status_parses_status_payload() -> None:
                     "connected": True,
                     "last_seen_at": "2026-03-07T14:05:59Z",
                     "online": True,
+                    "actions": {
+                        "show_photo": True,
+                        "show_tare": True,
+                        "show_tare_set": False,
+                        "show_tare_reset": True,
+                    },
                 },
             )
         ]
@@ -321,6 +330,12 @@ def test_get_device_status_parses_status_payload() -> None:
     assert result.status.connected is True
     assert result.status.last_seen_at == "2026-03-07T14:05:59Z"
     assert result.status.online is True
+    assert result.status.actions == DeviceActionVisibility(
+        show_photo=True,
+        show_tare=True,
+        show_tare_set=False,
+        show_tare_reset=True,
+    )
     method, _, kwargs = session.requests[0]
     assert method == "GET"
     assert kwargs["params"] == {"provider": "telegram", "provider_user_id": "100"}
@@ -540,3 +555,46 @@ def test_fetch_command_photo_maps_photo_not_ready() -> None:
 
     assert result.ok is False
     assert result.error_code == ERROR_COMMAND_PHOTO_NOT_READY
+
+
+def test_fetch_notification_result_image_success() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(
+                200,
+                b"img-bytes",
+                headers={"Content-Type": "image/jpeg"},
+            )
+        ]
+    )
+    client = _build_client(session)
+
+    result = asyncio.run(client.fetch_notification_result_image(_dummy_user(), _dummy_chat(), result_id="res-1"))
+
+    assert result.ok is True
+    assert result.payload == b"img-bytes"
+    assert result.content_type == "image/jpeg"
+    method, url, kwargs = session.requests[0]
+    assert method == "GET"
+    assert url.endswith("/bot/v1/notifications/results/res-1/image")
+    assert kwargs["params"] == {"provider": "telegram", "provider_user_id": "100"}
+
+
+def test_fetch_notification_result_image_maps_access_denied() -> None:
+    session = FakeSession([FakeResponse(403, {"detail": "image_access_denied"})])
+    client = _build_client(session)
+
+    result = asyncio.run(client.fetch_notification_result_image(_dummy_user(), _dummy_chat(), result_id="res-1"))
+
+    assert result.ok is False
+    assert result.error_code == ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED
+
+
+def test_fetch_notification_result_image_maps_not_found() -> None:
+    session = FakeSession([FakeResponse(404, {"detail": "result_not_found"})])
+    client = _build_client(session)
+
+    result = asyncio.run(client.fetch_notification_result_image(_dummy_user(), _dummy_chat(), result_id="res-1"))
+
+    assert result.ok is False
+    assert result.error_code == ERROR_NOTIFICATION_IMAGE_UNAVAILABLE
