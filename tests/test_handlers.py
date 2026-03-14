@@ -2139,7 +2139,7 @@ def test_notification_settings_back_to_picker_refreshes_store_list(tmp_path, mon
 def test_notification_settings_invalid_or_stale_callback_is_safe(tmp_path, monkeypatch) -> None:
     _load_test_catalog(tmp_path, monkeypatch)
 
-    callback_query = DummyCallbackQuery(data="settings:notifications:store:")
+    callback_query = DummyCallbackQuery(data="s:n:st:")
     oms_client = FakeOmsClient()
 
     asyncio.run(
