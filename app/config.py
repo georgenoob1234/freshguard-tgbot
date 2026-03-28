@@ -18,6 +18,9 @@ class Settings:
     internal_api_port: int
     internal_notifications_push_path: str
     internal_notifications_auth_token: str
+    tgbot_internal_auth_token: str
+    tgbot_webapp_verify_endpoint_path: str
+    telegram_webapp_auth_max_age_seconds: int
 
 
 def load_settings() -> Settings:
@@ -67,6 +70,24 @@ def load_settings() -> Settings:
         internal_notifications_push_path = f"/{internal_notifications_push_path}"
 
     internal_notifications_auth_token = os.getenv("INTERNAL_NOTIFICATIONS_AUTH_TOKEN", "").strip()
+    tgbot_internal_auth_token = os.getenv("TGBOT_INTERNAL_AUTH_TOKEN", "").strip()
+    if not tgbot_internal_auth_token:
+        tgbot_internal_auth_token = internal_notifications_auth_token
+
+    tgbot_webapp_verify_endpoint_path = (
+        os.getenv("TGBOT_WEBAPP_VERIFY_ENDPOINT_PATH", "/internal/admin-ui/verify-webapp-init").strip()
+        or "/internal/admin-ui/verify-webapp-init"
+    )
+    if not tgbot_webapp_verify_endpoint_path.startswith("/"):
+        tgbot_webapp_verify_endpoint_path = f"/{tgbot_webapp_verify_endpoint_path}"
+
+    raw_webapp_auth_max_age = os.getenv("TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS", "300").strip()
+    try:
+        telegram_webapp_auth_max_age_seconds = int(raw_webapp_auth_max_age)
+    except ValueError as exc:
+        raise ValueError("TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS must be a positive integer") from exc
+    if telegram_webapp_auth_max_age_seconds <= 0:
+        raise ValueError("TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS must be a positive integer")
 
     return Settings(
         telegram_bot_token=token,
@@ -80,4 +101,7 @@ def load_settings() -> Settings:
         internal_api_port=internal_api_port,
         internal_notifications_push_path=internal_notifications_push_path,
         internal_notifications_auth_token=internal_notifications_auth_token,
+        tgbot_internal_auth_token=tgbot_internal_auth_token,
+        tgbot_webapp_verify_endpoint_path=tgbot_webapp_verify_endpoint_path,
+        telegram_webapp_auth_max_age_seconds=telegram_webapp_auth_max_age_seconds,
     )

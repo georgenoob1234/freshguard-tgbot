@@ -15,6 +15,7 @@ from aiogram.exceptions import (
     TelegramNotFound,
 )
 from aiogram.types import InlineKeyboardMarkup
+from aiogram.utils.web_app import safe_parse_webapp_init_data
 
 from app.keyboards import build_notification_image_keyboard
 from app.messages import msg
@@ -60,28 +61,43 @@ class InternalNotificationsServer:
         port: int,
         push_path: str,
         auth_token: str | None = None,
+        webapp_verify_path: str = "/internal/admin-ui/verify-webapp-init",
+        webapp_verify_auth_token: str | None = None,
+        telegram_bot_token: str = "",
+        telegram_webapp_auth_max_age_seconds: int = 300,
     ) -> None:
         self._bot = bot
         self._host = host
         self._port = port
         self._push_path = push_path if push_path.startswith("/") else f"/{push_path}"
         self._auth_token = auth_token.strip() if auth_token else None
+        self._webapp_verify_path = (
+            webapp_verify_path if webapp_verify_path.startswith("/") else f"/{webapp_verify_path}"
+        )
+        self._webapp_verify_auth_token = (
+            webapp_verify_auth_token.strip() if webapp_verify_auth_token else None
+        )
+        self._telegram_bot_token = telegram_bot_token
+        self._telegram_webapp_auth_max_age_seconds = telegram_webapp_auth_max_age_seconds
         self._runner: web.AppRunner | None = None
         self._site: web.TCPSite | None = None
 
     async def start(self) -> None:
         app = web.Application()
         app.router.add_post(self._push_path, self._handle_push)
+        app.router.add_post(self._webapp_verify_path, self._handle_verify_webapp_init)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, host=self._host, port=self._port)
         await self._site.start()
         LOGGER.info(
-            "Internal notifications endpoint started host=%s port=%s path=%s auth_enabled=%s",
+            "Internal API endpoints started host=%s port=%s notifications_path=%s notifications_auth_enabled=%s webapp_verify_path=%s webapp_verify_auth_enabled=%s",
             self._host,
             self._port,
             self._push_path,
             bool(self._auth_token),
+            self._webapp_verify_path,
+            bool(self._webapp_verify_auth_token),
         )
 
     async def stop(self) -> None:
@@ -91,7 +107,7 @@ class InternalNotificationsServer:
             self._site = None
 
     async def _handle_push(self, request: web.Request) -> web.Response:
-        if not self._is_authorized_request(request):
+        if not self._is_authorized_request(request, auth_token=self._auth_token):
             return web.json_response({"detail": "unauthorized"}, status=401)
 
         payload = await self._read_json_body(request)
@@ -107,6 +123,52 @@ class InternalNotificationsServer:
             results.append(await self._process_delivery(batch.batch_id, delivery))
 
         return web.json_response({"batch_id": batch.batch_id, "results": results})
+
+    async def _handle_verify_webapp_init(self, request: web.Request) -> web.Response:
+        if not self._is_authorized_request(request, auth_token=self._webapp_verify_auth_token):
+            return web.json_response({"detail": "unauthorized"}, status=401)
+
+        payload = await self._read_json_body(request)
+        payload_dict = payload if isinstance(payload, dict) else {}
+        init_data = _string_or_none(payload_dict.get("init_data"))
+        if init_data is None:
+            return web.json_response({"ok": False, "reason": "invalid_telegram_init_data"})
+
+        try:
+            parsed_init_data = safe_parse_webapp_init_data(self._telegram_bot_token, init_data)
+        except ValueError:
+            return web.json_response({"ok": False, "reason": "invalid_telegram_init_data"})
+
+        if _is_stale_webapp_auth_date(
+            parsed_init_data.auth_date,
+            max_age_seconds=self._telegram_webapp_auth_max_age_seconds,
+        ):
+            return web.json_response({"ok": False, "reason": "stale_telegram_init_data"})
+
+        if parsed_init_data.user is None:
+            return web.json_response({"ok": False, "reason": "invalid_telegram_init_data"})
+
+        provider_user_id = str(parsed_init_data.user.id)
+        if not provider_user_id:
+            return web.json_response({"ok": False, "reason": "invalid_telegram_init_data"})
+
+        response_payload: dict[str, Any] = {
+            "ok": True,
+            "provider": "telegram",
+            "provider_user_id": provider_user_id,
+        }
+        if parsed_init_data.user.username:
+            response_payload["username"] = parsed_init_data.user.username
+
+        display_name = _resolve_telegram_display_name(
+            first_name=parsed_init_data.user.first_name,
+            last_name=parsed_init_data.user.last_name,
+            username=parsed_init_data.user.username,
+        )
+        if display_name:
+            response_payload["display_name"] = display_name
+
+        return web.json_response(response_payload)
 
     async def _process_delivery(
         self,
@@ -175,16 +237,16 @@ class InternalNotificationsServer:
         except Exception:
             return {}
 
-    def _is_authorized_request(self, request: web.Request) -> bool:
-        if not self._auth_token:
+    def _is_authorized_request(self, request: web.Request, *, auth_token: str | None) -> bool:
+        if not auth_token:
             return True
 
         auth_header = request.headers.get("Authorization", "")
-        expected_bearer = f"Bearer {self._auth_token}"
+        expected_bearer = f"Bearer {auth_token}"
         if auth_header == expected_bearer:
             return True
         token_header = request.headers.get("X-Internal-Token", "")
-        return token_header == self._auth_token
+        return token_header == auth_token
 
 
 def _parse_batch_payload(payload: Any) -> NotificationBatch:
@@ -330,3 +392,28 @@ def _bool_from_any(value: Any, *, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return bool(value)
+
+
+def _is_stale_webapp_auth_date(auth_date: datetime, *, max_age_seconds: int) -> bool:
+    if auth_date.tzinfo is None:
+        auth_date_utc = auth_date.replace(tzinfo=timezone.utc)
+    else:
+        auth_date_utc = auth_date.astimezone(timezone.utc)
+    age_seconds = (datetime.now(timezone.utc) - auth_date_utc).total_seconds()
+    return age_seconds > max_age_seconds
+
+
+def _resolve_telegram_display_name(
+    *,
+    first_name: str | None,
+    last_name: str | None,
+    username: str | None,
+) -> str | None:
+    name_parts = [part.strip() for part in (first_name, last_name) if isinstance(part, str) and part.strip()]
+    if name_parts:
+        return " ".join(name_parts)
+    if isinstance(username, str):
+        normalized_username = username.strip()
+        if normalized_username:
+            return normalized_username
+    return None

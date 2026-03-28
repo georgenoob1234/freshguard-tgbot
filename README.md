@@ -9,6 +9,7 @@ Telegram adapter microservice based on `aiogram` with:
 - inline callback flows for store switching, device selection, selected-device actions, tare submenu, and unlink confirmation
 - inline callback flow for per-store notification settings management
 - internal notifications endpoint for OMS push batches: `POST /internal/notifications/push`
+- internal Telegram WebApp verification endpoint for OMS: `POST /internal/admin-ui/verify-webapp-init`
 - defect notifications with `Show image` callback that fetches image bytes from OMS and sends a new Telegram photo message
 - browser admin login completion flow via Telegram deep-link `/start admin_login_<nonce>` and OMS `POST /bot/v1/admin-ui/login/claim` (bot disables link previews on the completion message to avoid prefetching single-use tokens)
 - environment-driven config
@@ -32,6 +33,9 @@ Environment variables:
 - `INTERNAL_API_PORT` (optional, default `8081`)
 - `INTERNAL_NOTIFICATIONS_PUSH_PATH` (optional, default `/internal/notifications/push`)
 - `INTERNAL_NOTIFICATIONS_AUTH_TOKEN` (optional, default empty/disabled)
+- `TGBOT_INTERNAL_AUTH_TOKEN` (optional; shared secret for OMS -> tgbot WebApp verification endpoint; if unset, falls back to `INTERNAL_NOTIFICATIONS_AUTH_TOKEN`)
+- `TGBOT_WEBAPP_VERIFY_ENDPOINT_PATH` (optional, default `/internal/admin-ui/verify-webapp-init`)
+- `TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS` (optional, default `300`)
 
 ## Run locally
 
@@ -87,6 +91,17 @@ Bot command menu entries are loaded from `bot_commands` in `config/messages.ru.j
 - Optional internal endpoint auth:
   - set `INTERNAL_NOTIFICATIONS_AUTH_TOKEN`
   - send either `Authorization: Bearer <token>` or `X-Internal-Token: <token>`
+
+## Internal WebApp verification
+
+- OMS calls `POST /internal/admin-ui/verify-webapp-init` on tgbot internal API.
+- Request body: `{"init_data":"<raw Telegram WebApp initData>"}`.
+- Endpoint auth uses `TGBOT_INTERNAL_AUTH_TOKEN` (or `INTERNAL_NOTIFICATIONS_AUTH_TOKEN` fallback) with:
+  - `Authorization: Bearer <token>` (preferred), or
+  - `X-Internal-Token: <token>`
+- tgbot validates the payload with `TELEGRAM_BOT_TOKEN`, enforces freshness via `TELEGRAM_WEBAPP_AUTH_MAX_AGE_SECONDS`, and returns:
+  - success: `{"ok":true,"provider":"telegram","provider_user_id":"...","username":"...","display_name":"..."}`
+  - failure: `{"ok":false,"reason":"invalid_telegram_init_data"}` or `{"ok":false,"reason":"stale_telegram_init_data"}`
 
 ## OMS contract notes
 

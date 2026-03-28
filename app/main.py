@@ -2321,6 +2321,10 @@ async def run_bot() -> None:
         port=settings.internal_api_port,
         push_path=settings.internal_notifications_push_path,
         auth_token=settings.internal_notifications_auth_token or None,
+        webapp_verify_path=settings.tgbot_webapp_verify_endpoint_path,
+        webapp_verify_auth_token=settings.tgbot_internal_auth_token or None,
+        telegram_bot_token=settings.telegram_bot_token,
+        telegram_webapp_auth_max_age_seconds=settings.telegram_webapp_auth_max_age_seconds,
     )
 
     try:
