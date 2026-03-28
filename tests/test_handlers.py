@@ -30,6 +30,7 @@ from app.callbacks import (
     build_unlink_pick_callback,
 )
 from app.main import (
+    admin_handler,
     device_back_callback_handler,
     device_last_callback_handler,
     device_photo_callback_handler,
@@ -62,6 +63,8 @@ from app.main import (
     unlink_pick_callback_handler,
 )
 from app.oms import (
+    ERROR_ADMIN_LOGIN_BANNED,
+    ERROR_ADMIN_LOGIN_NO_ACCESS,
     ERROR_DEVICE_NOT_IN_ACTIVE_STORE,
     ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
     ERROR_NO_ACTIVE_STORE,
@@ -73,6 +76,7 @@ from app.oms import (
     ERROR_STORE_NOT_AVAILABLE,
     ERROR_STORE_INACTIVE,
     ERROR_UNAVAILABLE,
+    AdminUiLoginClaimResult,
     CreateInviteResult,
     DeviceActionVisibility,
     DeviceStatusResult,
@@ -150,6 +154,7 @@ class FakeOmsClient:
         notification_settings_stores_results: list[NotificationSettingsStoresResult] | None = None,
         store_notification_settings_results: list[StoreNotificationSettingsResult] | None = None,
         update_store_notification_settings_results: list[StoreNotificationSettingsResult] | None = None,
+        claim_admin_ui_login_results: list[AdminUiLoginClaimResult] | None = None,
     ) -> None:
         self.calls: list[tuple[str, object | None]] = []
         self._ensure_results = ensure_results or [EnsureSessionResult(ok=True, degraded=False, is_banned=False)]
@@ -176,6 +181,9 @@ class FakeOmsClient:
         self._update_store_notification_settings_results = (
             update_store_notification_settings_results or [StoreNotificationSettingsResult(ok=True)]
         )
+        self._claim_admin_ui_login_results = claim_admin_ui_login_results or [
+            AdminUiLoginClaimResult(ok=True, completion_url="https://oms.example.com/admin/login")
+        ]
 
     def _next(self, queue: list[object]) -> object:
         if not queue:
@@ -275,6 +283,10 @@ class FakeOmsClient:
         )
         return self._next(self._update_store_notification_settings_results)
 
+    async def claim_admin_ui_login(self, from_user, chat, *, nonce: str) -> AdminUiLoginClaimResult:
+        self.calls.append(("claim_admin_ui_login", nonce))
+        return self._next(self._claim_admin_ui_login_results)
+
 
 def _write_catalog(path: str, payload: dict[str, object]) -> None:
     with open(path, "w", encoding="utf-8") as target:
@@ -289,6 +301,16 @@ def _catalog_payload() -> dict[str, object]:
         "start.linked_multi_store": "START MULTI {memberships_count} {store_name}",
         "help.body": "HELP",
         "ping.reply": "PONG",
+        "admin.open_browser": "ADMIN OPEN BROWSER {url}",
+        "admin.open_webapp": "ADMIN OPEN WEBAPP",
+        "admin_login.success": "ADMIN LOGIN OK {url}",
+        "admin_login.not_linked": "ADMIN LOGIN NOT LINKED",
+        "admin_login.no_access": "ADMIN LOGIN NO ACCESS",
+        "admin_login.challenge_invalid": "ADMIN LOGIN CHALLENGE INVALID",
+        "admin_login.challenge_expired": "ADMIN LOGIN CHALLENGE EXPIRED",
+        "admin_login.challenge_used": "ADMIN LOGIN CHALLENGE USED",
+        "admin_login.invalid_request": "ADMIN LOGIN INVALID REQUEST",
+        "admin_login.generic_error": "ADMIN LOGIN ERROR",
         "link.usage_hint": "LINK USAGE",
         "link.invalid_code": "LINK INVALID FORMAT",
         "link.success": "LINK OK {store_name}",
@@ -395,6 +417,7 @@ def _catalog_payload() -> dict[str, object]:
         "buttons.last_detection": "LAST",
         "buttons.photo": "PHOTO",
         "buttons.notification_settings": "NOTIFICATION SETTINGS BUTTON",
+        "buttons.open_admin_webapp": "OPEN ADMIN WEBAPP",
         "buttons.show_image": "SHOW IMAGE",
         "buttons.tare": "TARE",
         "buttons.back": "BACK",
@@ -405,6 +428,7 @@ def _catalog_payload() -> dict[str, object]:
             "help": "help",
             "ping": "ping",
             "link": "link",
+            "admin": "admin",
             "stores": "stores",
             "devices": "devices",
             "last": "last",
@@ -447,6 +471,128 @@ def test_start_handler_replies_when_user_banned(tmp_path, monkeypatch) -> None:
     asyncio.run(start_handler(message, session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=True)))
 
     message.answer.assert_awaited_once_with("BANNED", parse_mode="Markdown")
+
+
+def test_start_handler_admin_login_success(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    message = DummyMessage(text="/start admin_login_valid_nonce_012345")
+    oms_client = FakeOmsClient(
+        claim_admin_ui_login_results=[
+            AdminUiLoginClaimResult(ok=True, completion_url="https://oms.example.com/admin/login/telegram?token=abc")
+        ]
+    )
+
+    asyncio.run(
+        start_handler(
+            message,
+            command=SimpleNamespace(args="admin_login_valid_nonce_012345"),
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    message.answer.assert_awaited_once_with(
+        "ADMIN LOGIN OK https://oms.example.com/admin/login/telegram?token=abc",
+        parse_mode="Markdown",
+    )
+    assert oms_client.calls == [("claim_admin_ui_login", "valid_nonce_012345")]
+
+
+def test_start_handler_admin_login_invalid_nonce(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    message = DummyMessage(text="/start admin_login_bad*nonce")
+    oms_client = FakeOmsClient()
+
+    asyncio.run(
+        start_handler(
+            message,
+            command=SimpleNamespace(args="admin_login_bad*nonce"),
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    message.answer.assert_awaited_once_with("ADMIN LOGIN INVALID REQUEST", parse_mode="Markdown")
+    assert oms_client.calls == []
+
+
+def test_start_handler_admin_login_maps_error(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    message = DummyMessage(text="/start admin_login_valid_nonce_012345")
+    oms_client = FakeOmsClient(
+        claim_admin_ui_login_results=[AdminUiLoginClaimResult(ok=False, error_code=ERROR_ADMIN_LOGIN_NO_ACCESS)]
+    )
+
+    asyncio.run(
+        start_handler(
+            message,
+            command=SimpleNamespace(args="admin_login_valid_nonce_012345"),
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    message.answer.assert_awaited_once_with("ADMIN LOGIN NO ACCESS", parse_mode="Markdown")
+    assert oms_client.calls == [("claim_admin_ui_login", "valid_nonce_012345")]
+
+
+def test_start_handler_admin_login_banned_from_oms(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+
+    message = DummyMessage(text="/start admin_login_valid_nonce_012345")
+    oms_client = FakeOmsClient(
+        claim_admin_ui_login_results=[AdminUiLoginClaimResult(ok=False, error_code=ERROR_ADMIN_LOGIN_BANNED)]
+    )
+
+    asyncio.run(
+        start_handler(
+            message,
+            command=SimpleNamespace(args="admin_login_valid_nonce_012345"),
+            session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False),
+            oms_client=oms_client,
+        )
+    )
+
+    message.answer.assert_awaited_once_with("BANNED", parse_mode="Markdown")
+
+
+def _set_required_runtime_env(monkeypatch) -> None:
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("OMS_BASE_URL", "https://oms.example.com")
+    monkeypatch.setenv("OMS_BOT_TOKEN", "oms-token")
+
+
+def test_admin_handler_with_webapp_button(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+    _set_required_runtime_env(monkeypatch)
+    monkeypatch.setenv("ADMIN_UI_WEBAPP_URL", "https://oms.example.com/admin/telegram-webapp")
+
+    message = DummyMessage(text="/admin")
+    asyncio.run(admin_handler(message, session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False)))
+
+    assert message.answer.await_count == 1
+    assert message.answer.await_args.args[0] == "ADMIN OPEN WEBAPP"
+    assert message.answer.await_args.kwargs["parse_mode"] == "Markdown"
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].text == "OPEN ADMIN WEBAPP"
+    assert markup.inline_keyboard[0][0].web_app.url == "https://oms.example.com/admin/telegram-webapp"
+
+
+def test_admin_handler_fallbacks_to_browser_url(tmp_path, monkeypatch) -> None:
+    _load_test_catalog(tmp_path, monkeypatch)
+    _set_required_runtime_env(monkeypatch)
+    monkeypatch.delenv("ADMIN_UI_WEBAPP_URL", raising=False)
+
+    message = DummyMessage(text="/admin")
+    asyncio.run(admin_handler(message, session_state=EnsureSessionResult(ok=True, degraded=False, is_banned=False)))
+
+    message.answer.assert_awaited_once_with(
+        "ADMIN OPEN BROWSER https://oms.example.com/admin/login",
+        parse_mode="Markdown",
+    )
 
 
 def test_help_handler_replies_from_catalog(tmp_path, monkeypatch) -> None:

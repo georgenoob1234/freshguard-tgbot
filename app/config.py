@@ -11,6 +11,7 @@ class Settings:
     messages_path: Path
     log_level: str
     oms_base_url: str
+    admin_ui_webapp_url: str
     oms_bot_token: str
     http_timeout_seconds: float
     internal_api_host: str
@@ -27,6 +28,8 @@ def load_settings() -> Settings:
     oms_base_url = os.getenv("OMS_BASE_URL", "").strip()
     if not oms_base_url:
         raise ValueError("OMS_BASE_URL is required")
+
+    admin_ui_webapp_url = os.getenv("ADMIN_UI_WEBAPP_URL", "").strip()
 
     oms_bot_token = os.getenv("OMS_BOT_TOKEN", "").strip()
     if not oms_bot_token:
@@ -70,6 +73,7 @@ def load_settings() -> Settings:
         messages_path=messages_path,
         log_level=log_level,
         oms_base_url=oms_base_url,
+        admin_ui_webapp_url=admin_ui_webapp_url,
         oms_bot_token=oms_bot_token,
         http_timeout_seconds=http_timeout_seconds,
         internal_api_host=internal_api_host,

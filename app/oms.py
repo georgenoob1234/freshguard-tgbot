@@ -37,6 +37,13 @@ ERROR_STORE_HAS_NO_DEVICES = "store_has_no_devices"
 ERROR_STORE_NOT_FOUND = "store_not_found"
 ERROR_NOTIFICATIONS_NOT_AVAILABLE = "notifications_not_available"
 ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE = "notification_option_not_available"
+ERROR_ADMIN_LOGIN_NOT_LINKED = "admin_login_not_linked"
+ERROR_ADMIN_LOGIN_BANNED = "admin_login_banned"
+ERROR_ADMIN_LOGIN_NO_ACCESS = "admin_login_no_access"
+ERROR_ADMIN_LOGIN_CHALLENGE_INVALID = "admin_login_challenge_invalid"
+ERROR_ADMIN_LOGIN_CHALLENGE_EXPIRED = "admin_login_challenge_expired"
+ERROR_ADMIN_LOGIN_CHALLENGE_USED = "admin_login_challenge_used"
+ERROR_ADMIN_LOGIN_INVALID_REQUEST = "admin_login_invalid_request"
 ERROR_UNAVAILABLE = "unavailable"
 ERROR_UNKNOWN = "unknown"
 
@@ -122,6 +129,14 @@ class StoreNotificationSettings:
 class StoreNotificationSettingsResult:
     ok: bool
     settings: StoreNotificationSettings | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True)
+class AdminUiLoginClaimResult:
+    ok: bool
+    completion_url: str | None = None
+    expires_at: str | None = None
     error_code: str | None = None
 
 
@@ -1005,6 +1020,70 @@ class OmsClient:
         if status == 400 or {"invalid_result_id", "bad_request"} & tokens:
             return ERROR_NOTIFICATION_IMAGE_UNAVAILABLE
         return ERROR_NOTIFICATION_IMAGE_FAILED
+
+    def _map_admin_ui_login_claim_error(self, status: int, payload: Any) -> str:
+        tokens = set(_extract_error_tokens(payload))
+        if {"telegram_identity_not_linked"} & tokens:
+            return ERROR_ADMIN_LOGIN_NOT_LINKED
+        if {"user_banned"} & tokens:
+            return ERROR_ADMIN_LOGIN_BANNED
+        if {"admin_ui_access_required"} & tokens:
+            return ERROR_ADMIN_LOGIN_NO_ACCESS
+        if {"login_challenge_not_found"} & tokens:
+            return ERROR_ADMIN_LOGIN_CHALLENGE_INVALID
+        if {"login_challenge_expired"} & tokens:
+            return ERROR_ADMIN_LOGIN_CHALLENGE_EXPIRED
+        if {"login_challenge_already_claimed"} & tokens:
+            return ERROR_ADMIN_LOGIN_CHALLENGE_USED
+        if status == 422:
+            return ERROR_ADMIN_LOGIN_INVALID_REQUEST
+        if status == 404:
+            return ERROR_ADMIN_LOGIN_CHALLENGE_INVALID
+        if status == 400:
+            return ERROR_ADMIN_LOGIN_INVALID_REQUEST
+        if status == 409:
+            return ERROR_ADMIN_LOGIN_CHALLENGE_USED
+        return ERROR_UNKNOWN
+
+    async def claim_admin_ui_login(
+        self,
+        from_user: User | None,
+        chat: Chat | None,
+        *,
+        nonce: str,
+    ) -> AdminUiLoginClaimResult:
+        payload = self._build_bot_actor_payload(from_user)
+        if payload is None:
+            return AdminUiLoginClaimResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        raw_response = await self._request_json(
+            "POST",
+            "/admin-ui/login/claim",
+            user_id=payload.get("provider_user_id"),
+            chat_id=getattr(chat, "id", None),
+            json_payload={
+                "nonce": nonce,
+                "provider_user_id": payload["provider_user_id"],
+            },
+        )
+        if raw_response is None or raw_response.status >= 500:
+            return AdminUiLoginClaimResult(ok=False, error_code=ERROR_UNAVAILABLE)
+
+        if raw_response.status >= 400:
+            return AdminUiLoginClaimResult(
+                ok=False,
+                error_code=self._map_admin_ui_login_claim_error(raw_response.status, raw_response.payload),
+            )
+
+        response_data = _as_dict(raw_response.payload)
+        completion_url = _string_or_none(response_data.get("completion_url"))
+        if completion_url is None:
+            return AdminUiLoginClaimResult(ok=False, error_code=ERROR_UNKNOWN)
+        return AdminUiLoginClaimResult(
+            ok=True,
+            completion_url=completion_url,
+            expires_at=_string_or_none(response_data.get("expires_at")),
+        )
 
     async def ensure_session(self, from_user: User | None, chat: Chat | None) -> EnsureSessionResult:
         payload = self._build_session_payload(from_user, chat)

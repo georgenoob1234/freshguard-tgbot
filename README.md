@@ -5,10 +5,12 @@ Telegram adapter microservice based on `aiogram` with:
 - OMS session ensure call for private messages and callback updates
 - Telegram command menu configured from `config/messages.ru.json`
 - `/start`, `/help`, `/ping`, `/link`, `/stores`, `/devices`, `/last`, `/invite`, `/unlink`, `/settings`
+- `/admin` command for admin UI entrypoint (Web App button when configured, browser login fallback otherwise)
 - inline callback flows for store switching, device selection, selected-device actions, tare submenu, and unlink confirmation
 - inline callback flow for per-store notification settings management
 - internal notifications endpoint for OMS push batches: `POST /internal/notifications/push`
 - defect notifications with `Show image` callback that fetches image bytes from OMS and sends a new Telegram photo message
+- browser admin login completion flow via Telegram deep-link `/start admin_login_<nonce>` and OMS `POST /bot/v1/admin-ui/login/claim`
 - environment-driven config
 - JSON message catalogs for user-facing texts and command descriptions
 
@@ -21,6 +23,7 @@ Telegram adapter microservice based on `aiogram` with:
 Environment variables:
 - `TELEGRAM_BOT_TOKEN` (required)
 - `OMS_BASE_URL` (required, e.g. `https://oms.example.com`)
+- `ADMIN_UI_WEBAPP_URL` (optional, HTTPS URL for Telegram Web App admin entrypoint)
 - `OMS_BOT_TOKEN` (required, service-to-service bearer token)
 - `HTTP_TIMEOUT_SECONDS` (optional, default `5`)
 - `MESSAGES_PATH` (optional, default `config/messages.ru.json`)
@@ -45,6 +48,7 @@ After startup, the bot responds to:
 - `/help`
 - `/ping`
 - `/link <code>`
+- `/admin`
 - `/stores`
 - `/devices`
 - `/last`

@@ -5,6 +5,13 @@ import json
 from types import SimpleNamespace
 
 from app.oms import (
+    ERROR_ADMIN_LOGIN_BANNED,
+    ERROR_ADMIN_LOGIN_CHALLENGE_EXPIRED,
+    ERROR_ADMIN_LOGIN_CHALLENGE_INVALID,
+    ERROR_ADMIN_LOGIN_CHALLENGE_USED,
+    ERROR_ADMIN_LOGIN_INVALID_REQUEST,
+    ERROR_ADMIN_LOGIN_NO_ACCESS,
+    ERROR_ADMIN_LOGIN_NOT_LINKED,
     ERROR_DEVICE_NOT_IN_ACTIVE_STORE,
     ERROR_INVALID_CODE,
     ERROR_NO_ACTIVE_STORE,
@@ -231,6 +238,68 @@ def test_create_invite_maps_store_inactive_error() -> None:
 
     assert result.ok is False
     assert result.error_code == ERROR_STORE_INACTIVE
+
+
+def test_claim_admin_ui_login_uses_provider_identity_and_nonce() -> None:
+    session = FakeSession(
+        [FakeResponse(200, {"completion_url": "https://oms.example.com/admin/login/telegram/complete?token=abc"})]
+    )
+    client = _build_client(session)
+
+    result = asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef"))
+
+    assert result.ok is True
+    assert result.completion_url == "https://oms.example.com/admin/login/telegram/complete?token=abc"
+    method, _, kwargs = session.requests[0]
+    assert method == "POST"
+    assert kwargs["json"] == {
+        "nonce": "nonce_1234567890abcdef",
+        "provider_user_id": "100",
+    }
+
+
+def test_claim_admin_ui_login_maps_linked_access_and_challenge_errors() -> None:
+    session = FakeSession(
+        [
+            FakeResponse(403, {"detail": "telegram_identity_not_linked"}),
+            FakeResponse(403, {"detail": "user_banned"}),
+            FakeResponse(403, {"detail": "admin_ui_access_required"}),
+            FakeResponse(404, {"detail": "login_challenge_not_found"}),
+            FakeResponse(400, {"detail": "login_challenge_expired"}),
+            FakeResponse(409, {"detail": "login_challenge_already_claimed"}),
+            FakeResponse(422, {"detail": "validation_failed"}),
+        ]
+    )
+    client = _build_client(session)
+
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_NOT_LINKED
+    )
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_BANNED
+    )
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_NO_ACCESS
+    )
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_CHALLENGE_INVALID
+    )
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_CHALLENGE_EXPIRED
+    )
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_CHALLENGE_USED
+    )
+    assert (
+        asyncio.run(client.claim_admin_ui_login(_dummy_user(), _dummy_chat(), nonce="nonce_1234567890abcdef")).error_code
+        == ERROR_ADMIN_LOGIN_INVALID_REQUEST
+    )
 
 
 def test_set_active_store_maps_membership_not_found_to_not_linked() -> None:

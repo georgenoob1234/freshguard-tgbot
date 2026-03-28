@@ -9,7 +9,14 @@ from typing import Any
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    WebAppInfo,
+)
 
 from app.callbacks import (
     DEVICE_BACK,
@@ -82,6 +89,13 @@ from app.oms import (
     ERROR_COMMAND_PHOTO_NOT_FOUND,
     ERROR_COMMAND_PHOTO_NOT_READY,
     ERROR_COMMAND_UNSUPPORTED,
+    ERROR_ADMIN_LOGIN_BANNED,
+    ERROR_ADMIN_LOGIN_CHALLENGE_EXPIRED,
+    ERROR_ADMIN_LOGIN_CHALLENGE_INVALID,
+    ERROR_ADMIN_LOGIN_CHALLENGE_USED,
+    ERROR_ADMIN_LOGIN_INVALID_REQUEST,
+    ERROR_ADMIN_LOGIN_NOT_LINKED,
+    ERROR_ADMIN_LOGIN_NO_ACCESS,
     ERROR_NOTIFICATION_OPTION_NOT_AVAILABLE,
     ERROR_NOTIFICATION_IMAGE_ACCESS_DENIED,
     ERROR_NOTIFICATION_IMAGE_FAILED,
@@ -110,6 +124,8 @@ from app.private_session_middleware import PrivateSessionMiddleware
 LOGGER = logging.getLogger(__name__)
 router = Router(name="tgbot-router")
 INVITE_CODE_PATTERN = re.compile(r"^\d{6}$")
+ADMIN_LOGIN_START_PREFIX = "admin_login_"
+ADMIN_LOGIN_NONCE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 MSK_TIMEZONE = timezone(timedelta(hours=3), name="MSK")
 LINK_ERROR_MESSAGES = {
     ERROR_ALREADY_LINKED: "link.already_linked",
@@ -118,6 +134,14 @@ LINK_ERROR_MESSAGES = {
     ERROR_REVOKED: "link.revoked",
     ERROR_EXHAUSTED: "link.exhausted",
     ERROR_STORE_INACTIVE: "link.store_inactive",
+}
+ADMIN_LOGIN_ERROR_MESSAGES = {
+    ERROR_ADMIN_LOGIN_NOT_LINKED: "admin_login.not_linked",
+    ERROR_ADMIN_LOGIN_NO_ACCESS: "admin_login.no_access",
+    ERROR_ADMIN_LOGIN_CHALLENGE_INVALID: "admin_login.challenge_invalid",
+    ERROR_ADMIN_LOGIN_CHALLENGE_EXPIRED: "admin_login.challenge_expired",
+    ERROR_ADMIN_LOGIN_CHALLENGE_USED: "admin_login.challenge_used",
+    ERROR_ADMIN_LOGIN_INVALID_REQUEST: "admin_login.invalid_request",
 }
 IN_FLIGHT_COMMANDS: dict[tuple[int, str, str], float] = {}
 IN_FLIGHT_TTL_SECONDS = 30.0
@@ -188,6 +212,23 @@ def _extract_command_arg(message: Message, command: CommandObject | None = None)
 
 def _is_valid_invite_code(code: str | None) -> bool:
     return bool(code and INVITE_CODE_PATTERN.fullmatch(code))
+
+
+def _extract_admin_login_nonce(payload: str | None) -> tuple[bool, str | None]:
+    if payload is None or not payload.startswith(ADMIN_LOGIN_START_PREFIX):
+        return False, None
+    nonce = payload.removeprefix(ADMIN_LOGIN_START_PREFIX).strip()
+    if not nonce or not ADMIN_LOGIN_NONCE_PATTERN.fullmatch(nonce):
+        return True, None
+    return True, nonce
+
+
+def _build_admin_webapp_keyboard(url: str) -> InlineKeyboardMarkup:
+    button = InlineKeyboardButton(
+        text=msg("buttons.open_admin_webapp"),
+        web_app=WebAppInfo(url=url),
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
 def _find_store(stores_result: StoresResult, store_id: str) -> StoreSummary | None:
@@ -802,7 +843,12 @@ async def _toggle_store_notification_preference(
 
 
 @router.message(Command("start"))
-async def start_handler(message: Message, session_state: EnsureSessionResult | None = None) -> None:
+async def start_handler(
+    message: Message,
+    command: CommandObject | None = None,
+    session_state: EnsureSessionResult | None = None,
+    oms_client: OmsClient | None = None,
+) -> None:
     user_id = message.from_user.id if message.from_user else "unknown"
     LOGGER.info("Handling /start from user_id=%s", user_id)
 
@@ -812,6 +858,41 @@ async def start_handler(message: Message, session_state: EnsureSessionResult | N
 
     if session_state.degraded:
         await _send_message(message, msg("errors.oms_unavailable"))
+        return
+
+    start_payload = _extract_command_arg(message, command)
+    is_admin_login_payload, nonce = _extract_admin_login_nonce(start_payload)
+    if is_admin_login_payload:
+        if session_state.is_banned:
+            await _send_message(message, msg("errors.banned"))
+            return
+        if nonce is None:
+            await _send_message(message, msg("admin_login.invalid_request"))
+            return
+
+        oms_client = await _require_oms_client_for_message(message, oms_client)
+        if oms_client is None:
+            return
+
+        claim_result = await oms_client.claim_admin_ui_login(
+            message.from_user,
+            message.chat,
+            nonce=nonce,
+        )
+        if not claim_result.ok:
+            if claim_result.error_code == ERROR_UNAVAILABLE:
+                await _send_message(message, msg("errors.oms_unavailable"))
+                return
+            if claim_result.error_code in {ERROR_ADMIN_LOGIN_BANNED, ERROR_PERMISSION_DENIED}:
+                await _send_message(message, msg("errors.banned"))
+                return
+            message_key = ADMIN_LOGIN_ERROR_MESSAGES.get(claim_result.error_code, "admin_login.generic_error")
+            await _send_message(message, msg(message_key))
+            return
+        if not claim_result.completion_url:
+            await _send_message(message, msg("admin_login.generic_error"))
+            return
+        await _send_message(message, msg("admin_login.success", url=claim_result.completion_url))
         return
 
     if session_state.is_banned:
@@ -833,6 +914,30 @@ async def ping_handler(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else "unknown"
     LOGGER.info("Handling /ping from user_id=%s", user_id)
     await _send_message(message, msg("ping.reply"))
+
+
+@router.message(Command("admin"))
+async def admin_handler(message: Message, session_state: EnsureSessionResult | None = None) -> None:
+    user_id = message.from_user.id if message.from_user else "unknown"
+    LOGGER.info("Handling /admin from user_id=%s", user_id)
+
+    if await _reply_blocked_message(message, session_state):
+        return
+
+    settings = load_settings()
+    webapp_url = settings.admin_ui_webapp_url
+    if webapp_url:
+        await _send_message(
+            message,
+            msg("admin.open_webapp"),
+            reply_markup=_build_admin_webapp_keyboard(webapp_url),
+        )
+        return
+
+    await _send_message(
+        message,
+        msg("admin.open_browser", url=f"{settings.oms_base_url.rstrip('/')}/admin/login"),
+    )
 
 
 @router.message(Command("link"))
@@ -2148,10 +2253,11 @@ async def run_bot() -> None:
     setup_logging(settings.log_level)
     LOGGER.info("Starting tgbot service")
     LOGGER.info(
-        "Config loaded: messages_path=%s, log_level=%s, oms_base_url=%s, http_timeout_seconds=%s, internal_api_host=%s, internal_api_port=%s, internal_notifications_path=%s",
+        "Config loaded: messages_path=%s, log_level=%s, oms_base_url=%s, admin_ui_webapp_url=%s, http_timeout_seconds=%s, internal_api_host=%s, internal_api_port=%s, internal_notifications_path=%s",
         settings.messages_path,
         settings.log_level,
         settings.oms_base_url,
+        settings.admin_ui_webapp_url or "<not-set>",
         settings.http_timeout_seconds,
         settings.internal_api_host,
         settings.internal_api_port,
