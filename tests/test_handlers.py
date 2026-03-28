@@ -303,7 +303,7 @@ def _catalog_payload() -> dict[str, object]:
         "ping.reply": "PONG",
         "admin.open_browser": "ADMIN OPEN BROWSER {url}",
         "admin.open_webapp": "ADMIN OPEN WEBAPP",
-        "admin_login.success": "ADMIN LOGIN OK {url}",
+        "admin_login.success": "ADMIN LOGIN OK",
         "admin_login.not_linked": "ADMIN LOGIN NOT LINKED",
         "admin_login.no_access": "ADMIN LOGIN NO ACCESS",
         "admin_login.challenge_invalid": "ADMIN LOGIN CHALLENGE INVALID",
@@ -418,6 +418,7 @@ def _catalog_payload() -> dict[str, object]:
         "buttons.photo": "PHOTO",
         "buttons.notification_settings": "NOTIFICATION SETTINGS BUTTON",
         "buttons.open_admin_webapp": "OPEN ADMIN WEBAPP",
+        "buttons.finish_admin_login": "FINISH ADMIN LOGIN",
         "buttons.show_image": "SHOW IMAGE",
         "buttons.tare": "TARE",
         "buttons.back": "BACK",
@@ -492,10 +493,13 @@ def test_start_handler_admin_login_success(tmp_path, monkeypatch) -> None:
         )
     )
 
-    message.answer.assert_awaited_once_with(
-        "ADMIN LOGIN OK https://oms.example.com/admin/login/telegram?token=abc",
-        parse_mode="Markdown",
-    )
+    assert message.answer.await_count == 1
+    assert message.answer.await_args.args[0] == "ADMIN LOGIN OK"
+    assert message.answer.await_args.kwargs["parse_mode"] == "Markdown"
+    assert message.answer.await_args.kwargs["disable_web_page_preview"] is True
+    markup = message.answer.await_args.kwargs["reply_markup"]
+    assert markup.inline_keyboard[0][0].text == "FINISH ADMIN LOGIN"
+    assert markup.inline_keyboard[0][0].url == "https://oms.example.com/admin/login/telegram?token=abc"
     assert oms_client.calls == [("claim_admin_ui_login", "valid_nonce_012345")]
 
 

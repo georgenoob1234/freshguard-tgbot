@@ -231,6 +231,14 @@ def _build_admin_webapp_keyboard(url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[button]])
 
 
+def _build_admin_login_completion_keyboard(url: str) -> InlineKeyboardMarkup:
+    button = InlineKeyboardButton(
+        text=msg("buttons.finish_admin_login"),
+        url=url,
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[button]])
+
+
 def _find_store(stores_result: StoresResult, store_id: str) -> StoreSummary | None:
     for store in stores_result.stores:
         if store.id == store_id:
@@ -598,11 +606,39 @@ async def _load_selected_device_card_text(
     return _join_parts(notice_text or "", card_text), status
 
 
-async def _send_message(message: Message, text: str, *, reply_markup: object | None = None) -> None:
+async def _send_message(
+    message: Message,
+    text: str,
+    *,
+    reply_markup: object | None = None,
+    disable_web_page_preview: bool = False,
+) -> None:
     if reply_markup is None:
-        await message.answer(text, parse_mode="Markdown")
+        if disable_web_page_preview:
+            await message.answer(
+                text,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
+            )
+            return
+        await message.answer(
+            text,
+            parse_mode="Markdown",
+        )
         return
-    await message.answer(text, reply_markup=reply_markup, parse_mode="Markdown")
+    if disable_web_page_preview:
+        await message.answer(
+            text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        return
+    await message.answer(
+        text,
+        reply_markup=reply_markup,
+        parse_mode="Markdown",
+    )
 
 
 async def _edit_callback_message(
@@ -892,7 +928,12 @@ async def start_handler(
         if not claim_result.completion_url:
             await _send_message(message, msg("admin_login.generic_error"))
             return
-        await _send_message(message, msg("admin_login.success", url=claim_result.completion_url))
+        await _send_message(
+            message,
+            msg("admin_login.success"),
+            reply_markup=_build_admin_login_completion_keyboard(claim_result.completion_url),
+            disable_web_page_preview=True,
+        )
         return
 
     if session_state.is_banned:

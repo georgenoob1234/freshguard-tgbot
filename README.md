@@ -10,7 +10,7 @@ Telegram adapter microservice based on `aiogram` with:
 - inline callback flow for per-store notification settings management
 - internal notifications endpoint for OMS push batches: `POST /internal/notifications/push`
 - defect notifications with `Show image` callback that fetches image bytes from OMS and sends a new Telegram photo message
-- browser admin login completion flow via Telegram deep-link `/start admin_login_<nonce>` and OMS `POST /bot/v1/admin-ui/login/claim`
+- browser admin login completion flow via Telegram deep-link `/start admin_login_<nonce>` and OMS `POST /bot/v1/admin-ui/login/claim` (bot disables link previews on the completion message to avoid prefetching single-use tokens)
 - environment-driven config
 - JSON message catalogs for user-facing texts and command descriptions
 
