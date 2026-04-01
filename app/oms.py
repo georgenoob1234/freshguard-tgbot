@@ -1306,7 +1306,7 @@ class OmsClient:
         from_user: User | None,
         chat: Chat | None,
         *,
-        role: str = "store_admin",
+        role: str = "operator",
     ) -> CreateInviteResult:
         payload = self._build_bot_actor_payload(from_user)
         if payload is None:
