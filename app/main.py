@@ -1169,7 +1169,7 @@ async def invite_handler(
     if oms_client is None:
         return
 
-    invite_result = await oms_client.create_invite(message.from_user, message.chat, role="store_admin")
+    invite_result = await oms_client.create_invite(message.from_user, message.chat, role="operator")
     if not invite_result.ok:
         if invite_result.error_code == ERROR_UNAVAILABLE:
             await _send_message(message, msg("errors.oms_unavailable"))
